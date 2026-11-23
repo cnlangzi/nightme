@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // errReviewAborted is the cancellation cause an abort installs on a
@@ -67,7 +69,7 @@ func aborted(ctx context.Context) bool {
 func (f *Factory) handleAbort(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	h, others, ok := f.abortRun(input.ChatID)
 	if !ok {
-		chatsession.ReportOutcome(ctx, command.NoopOutcome("no review is running in this chat", nil))
+		chatsession.ReportOutcome(ctx, command.SuccessOutcome("no review is running in this chat", nil))
 		return command.Reply(ctx, rt, "ℹ️ no review is running in this chat"), nil
 	}
 
@@ -89,13 +91,14 @@ func (f *Factory) handleAbort(ctx context.Context, rt command.RuntimeServices, i
 	if winding {
 		lines = append(lines, "⏳ the review is still winding down")
 	}
-	chatsession.ReportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: fmt.Sprintf("aborted the review (%s)", h.agent),
+	chatsession.ReportOutcome(ctx, outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: fmt.Sprintf("aborted the review (%s)", h.agent),
 		Data: map[string]string{
-			"agent":   h.agent,
-			"kind":    h.kind,
-			"elapsed": elapsed.String(),
+			KeyAgent:   h.agent,
+			KeyKind:    h.kind,
+			KeyElapsed: elapsed.String(),
 		},
 	})
 	return command.Reply(ctx, rt, strings.Join(lines, "\n")), nil
@@ -112,11 +115,12 @@ func reportAborted(ctx context.Context, work *chatsession.Work, emitter messages
 	chatID, replyTo, runner, kind string, outcomes []reviewOutcome,
 ) {
 	groups, unfinished := groupCounts(outcomes)
-	data := unfinishedData(map[string]string{"agent": runner, "reason": "aborted", "delivered": "false"}, outcomes)
-	work.Report(messages.Outcome{
-		Status:  messages.OutcomeCancelled,
-		Summary: fmt.Sprintf("the %s was aborted (%d of %d groups unfinished)", kind, unfinished, groups),
-		Data:    data,
+	data := unfinishedData(map[string]string{KeyAgent: runner, BoolKeyDelivered: "false"}, outcomes)
+	work.Report(outcome.Outcome{
+		Success:    false,
+		Status:     outcome.StatusClientClosedRequest,
+		StatusText: fmt.Sprintf("the %s was aborted (%d of %d groups unfinished)", kind, unfinished, groups),
+		Data:       data,
 	})
 	if emitter == nil {
 		return

@@ -114,6 +114,12 @@ type Prompt struct {
 	// (`agent.PromptEndClean` is iota=0, so technically non-zero too —
 	// callers should test `EndedAt.IsZero()` for "still running").
 	EndReason agent.PromptEndReason
+
+	// Err is the failure the turn reported, when it reported one. An
+	// upstream failure that carries an HTTP status — a 429 from the
+	// API — rides on it, so the layer that settles the message knows
+	// what the upstream said without reading the transcript.
+	Err error
 }
 
 // PromptHook is the flush-time callback installed on InputBuffer.

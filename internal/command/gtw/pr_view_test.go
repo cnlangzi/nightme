@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // prViewRig is the /gtw pr view test rig: a git repo with an origin
@@ -99,12 +101,12 @@ func (r *prViewRig) driveOut(t *testing.T, args ...string) *command.SlashOutput 
 
 // settle releases the message's work and returns the outcome the
 // command reported.
-func (r *prViewRig) settle(t *testing.T) *messages.Outcome {
+func (r *prViewRig) settle(t *testing.T) *outcome.Outcome {
 	t.Helper()
 	r.work.Release()
 	r.rec.mu.Lock()
 	defer r.rec.mu.Unlock()
-	var out *messages.Outcome
+	var out *outcome.Outcome
 	for _, m := range r.rec.sends {
 		if m.Kind != messages.OutMessageSettled {
 			continue
@@ -146,19 +148,18 @@ func TestPRView_MergeableIsOK(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command settled no outcome")
 	}
-	if out.Status != messages.OutcomeOK {
-		t.Fatalf("the status is %q, want ok", out.Status)
+	if out.Status != http.StatusOK {
+		t.Fatalf("the status is %d, want %d", out.Status, http.StatusOK)
 	}
-	if _, ok := out.Data[messages.OutcomeKeyError]; ok {
-		t.Errorf("an ok outcome carries an error description: %q", out.Data[messages.OutcomeKeyError])
+	if !out.Success {
+		t.Errorf("a mergeable pull request is a success, got status %d", out.Status)
 	}
 	for key, want := range map[string]string{
 		"pr_number":   "123",
 		"pr_url":      "https://github.com/cnlangzi/nightme/pull/123",
 		"pr_state":    "open",
 		"base_branch": "main",
-		"mergeable":   "1",
-		"conflict":    "0",
+		"conflict":    "false",
 		"merge_state": "mergeable",
 	} {
 		if out.Data[key] != want {
@@ -183,20 +184,14 @@ func TestPRView_ConflictIsANormalBranch(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command settled no outcome")
 	}
-	if out.Status != messages.OutcomeFailed {
-		t.Fatalf("the status is %q, want failed", out.Status)
+	if out.Status != http.StatusOK {
+		t.Fatalf("the status is %d, want %d", out.Status, http.StatusOK)
 	}
-	if _, ok := out.Data[messages.OutcomeKeyError]; ok {
-		t.Errorf("a normal branch carries an error description: %q", out.Data[messages.OutcomeKeyError])
+	if !out.Success {
+		t.Error("a conflicting pull request is a conclusion, not a breakage")
 	}
-	if out.Data["reason"] != "merge_conflict" {
-		t.Errorf("the reason is %q, want merge_conflict", out.Data["reason"])
-	}
-	if out.Data["mergeable"] != "0" {
-		t.Errorf("Data[mergeable] = %q, want 0", out.Data["mergeable"])
-	}
-	if out.Data["conflict"] != "1" {
-		t.Errorf("Data[conflict] = %q, want 1", out.Data["conflict"])
+	if out.Data["conflict"] != "true" {
+		t.Errorf("Data[conflict] = %q, want true", out.Data["conflict"])
 	}
 	if out.Data["merge_state"] != "conflicting" {
 		t.Errorf("Data[merge_state] = %q, want conflicting", out.Data["merge_state"])
@@ -224,18 +219,14 @@ func TestPRView_BehindIsANormalBranch(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command settled no outcome")
 	}
-	if out.Status != messages.OutcomeFailed {
-		t.Fatalf("the status is %q, want failed", out.Status)
+	if out.Status != http.StatusOK {
+		t.Fatalf("the status is %d, want %d", out.Status, http.StatusOK)
 	}
-	if _, ok := out.Data[messages.OutcomeKeyError]; ok {
-		t.Errorf("a normal branch carries an error description: %q", out.Data[messages.OutcomeKeyError])
+	if !out.Success {
+		t.Error("a pull request behind its base is a conclusion, not a breakage")
 	}
-	if out.Data["reason"] != "pr_behind" {
-		t.Errorf("the reason is %q, want pr_behind", out.Data["reason"])
-	}
-	if out.Data["mergeable"] != "0" || out.Data["conflict"] != "0" {
-		t.Errorf("the flags are mergeable=%q conflict=%q, want 0/0",
-			out.Data["mergeable"], out.Data["conflict"])
+	if out.Data["conflict"] != "false" {
+		t.Errorf("Data[conflict] = %q, want false", out.Data["conflict"])
 	}
 	if out.Data["merge_state"] != "behind" {
 		t.Errorf("Data[merge_state] = %q, want behind", out.Data["merge_state"])
@@ -256,14 +247,11 @@ func TestPRView_BlockedIsANormalBranch(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command settled no outcome")
 	}
-	if out.Status != messages.OutcomeFailed {
-		t.Fatalf("the status is %q, want failed", out.Status)
+	if out.Status != http.StatusOK {
+		t.Fatalf("the status is %d, want %d", out.Status, http.StatusOK)
 	}
-	if _, ok := out.Data[messages.OutcomeKeyError]; ok {
-		t.Errorf("a normal branch carries an error description: %q", out.Data[messages.OutcomeKeyError])
-	}
-	if out.Data["reason"] != "pr_blocked" {
-		t.Errorf("the reason is %q, want pr_blocked", out.Data["reason"])
+	if !out.Success {
+		t.Error("a blocked pull request is a conclusion, not a breakage")
 	}
 	if out.Data["merge_state"] != "blocked" {
 		t.Errorf("Data[merge_state] = %q, want blocked", out.Data["merge_state"])
@@ -299,8 +287,8 @@ func TestPRView_RetriesUntilThePlatformComputesTheState(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command settled no outcome")
 	}
-	if out.Status != messages.OutcomeOK {
-		t.Fatalf("the status is %q, want ok", out.Status)
+	if out.Status != http.StatusOK {
+		t.Fatalf("the status is %d, want %d", out.Status, http.StatusOK)
 	}
 	if out.Data["merge_state"] != "mergeable" {
 		t.Errorf("Data[merge_state] = %q, want mergeable", out.Data["merge_state"])
@@ -333,14 +321,11 @@ func TestPRView_UnknownAfterTheRetriesIsAnException(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command settled no outcome")
 	}
-	if out.Status != messages.OutcomeFailed {
-		t.Fatalf("the status is %q, want failed", out.Status)
+	if out.Status != http.StatusServiceUnavailable {
+		t.Fatalf("the status is %d, want %d", out.Status, http.StatusServiceUnavailable)
 	}
-	if out.Data["reason"] != "state_unknown" {
-		t.Errorf("the reason is %q, want state_unknown", out.Data["reason"])
-	}
-	if out.Data[messages.OutcomeKeyError] == "" {
-		t.Error("an exception carries no error description")
+	if out.Success {
+		t.Error("an exception is not a success")
 	}
 	if out.Data["merge_state"] != "unknown" {
 		t.Errorf("Data[merge_state] = %q, want unknown", out.Data["merge_state"])
@@ -370,29 +355,23 @@ func TestPRView_ClosedPRIsANoop(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command settled no outcome")
 	}
-	if out.Status != messages.OutcomeNoop {
-		t.Fatalf("the status is %q, want noop", out.Status)
-	}
-	if out.Data["reason"] != "pr_closed" {
-		t.Errorf("the reason is %q, want pr_closed", out.Data["reason"])
+	if out.Status != http.StatusOK {
+		t.Fatalf("the status is %d, want %d", out.Status, http.StatusOK)
 	}
 	if out.Data["pr_state"] != "merged" {
 		t.Errorf("Data[pr_state] = %q, want merged", out.Data["pr_state"])
 	}
-	// The seven keys are there whenever the pull request was read.
+	// The keys are there whenever the pull request was read.
 	for _, key := range []string{
 		"pr_number", "pr_url", "pr_state", "base_branch",
-		"mergeable", "conflict", "merge_state",
+		"conflict", "merge_state",
 	} {
 		if _, ok := out.Data[key]; !ok {
 			t.Errorf("Data[%q] is missing", key)
 		}
 	}
-	if out.Data["mergeable"] != "0" {
-		t.Errorf("Data[mergeable] = %q, want 0", out.Data["mergeable"])
-	}
-	if _, ok := out.Data[messages.OutcomeKeyError]; ok {
-		t.Errorf("a noop carries an error description: %q", out.Data[messages.OutcomeKeyError])
+	if out.Data["conflict"] != "false" {
+		t.Errorf("Data[conflict] = %q, want false", out.Data["conflict"])
 	}
 	if !strings.HasPrefix(card, "✨ PR #123 is already merged") {
 		t.Errorf("the card is %q", card)
@@ -409,11 +388,8 @@ func TestPRView_NoOpenPRIsANoop(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command settled no outcome")
 	}
-	if out.Status != messages.OutcomeNoop {
-		t.Fatalf("the status is %q, want noop", out.Status)
-	}
-	if out.Data["reason"] != "no_pr" {
-		t.Errorf("the reason is %q, want no_pr", out.Data["reason"])
+	if out.Status != http.StatusNotFound {
+		t.Fatalf("the status is %d, want %d", out.Status, http.StatusNotFound)
 	}
 	if !strings.HasPrefix(card, "✨ no open pull request for ") {
 		t.Errorf("the card is %q", card)
@@ -436,14 +412,11 @@ func TestPRView_NotFoundIsAnException(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command settled no outcome")
 	}
-	if out.Status != messages.OutcomeFailed {
-		t.Fatalf("the status is %q, want failed", out.Status)
+	if out.Status != http.StatusNotFound {
+		t.Fatalf("the status is %d, want %d", out.Status, http.StatusNotFound)
 	}
-	if out.Data["reason"] != "pr_not_found" {
-		t.Errorf("the reason is %q, want pr_not_found", out.Data["reason"])
-	}
-	if out.Data[messages.OutcomeKeyError] == "" {
-		t.Error("an exception carries no error description")
+	if out.Success {
+		t.Error("an exception is not a success")
 	}
 	if !strings.HasPrefix(card, "❌ no pull request #999") {
 		t.Errorf("the card is %q", card)
@@ -461,20 +434,16 @@ func TestPRView_ProviderFailureIsAnException(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command settled no outcome")
 	}
-	if out.Status != messages.OutcomeFailed {
-		t.Fatalf("the status is %q, want failed", out.Status)
+	if out.Status != http.StatusServiceUnavailable {
+		t.Fatalf("the status is %d, want %d", out.Status, http.StatusServiceUnavailable)
 	}
-	if out.Data["reason"] != "provider_error" {
-		t.Errorf("the reason is %q, want provider_error", out.Data["reason"])
+	if out.Success {
+		t.Error("an exception is not a success")
 	}
-	if out.Data[messages.OutcomeKeyError] == "" {
-		t.Error("an exception carries no error description")
-	}
-	// The provider's own message rides on the description, so a
-	// program reads what actually broke.
-	if !strings.Contains(out.Data[messages.OutcomeKeyError], "authentication required") {
-		t.Errorf("the description drops the provider's own message: %q",
-			out.Data[messages.OutcomeKeyError])
+	// The provider's own message rides on the words, so a program
+	// reads what actually broke.
+	if !strings.Contains(out.StatusText, "authentication required") {
+		t.Errorf("the words drop the provider's own message: %q", out.StatusText)
 	}
 	if !strings.Contains(card, "authentication required") {
 		t.Errorf("the card drops the provider's own message: %q", card)
@@ -491,14 +460,11 @@ func TestPRView_BadNumberIsAUsageError(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command settled no outcome")
 	}
-	if out.Status != messages.OutcomeFailed {
-		t.Fatalf("the status is %q, want failed", out.Status)
+	if out.Status != http.StatusBadRequest {
+		t.Fatalf("the status is %d, want %d", out.Status, http.StatusBadRequest)
 	}
-	if out.Data["reason"] != "usage" {
-		t.Errorf("the reason is %q, want usage", out.Data["reason"])
-	}
-	if out.Data[messages.OutcomeKeyError] == "" {
-		t.Error("an exception carries no error description")
+	if out.Success {
+		t.Error("an exception is not a success")
 	}
 	if !strings.HasPrefix(reply.Reply, "❌ ") {
 		t.Errorf("the reply is %q", reply.Reply)
@@ -514,8 +480,8 @@ func TestPRView_ZeroIsAUsageError(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command settled no outcome")
 	}
-	if out.Data["reason"] != "usage" {
-		t.Errorf("the reason is %q, want usage", out.Data["reason"])
+	if out.Status != http.StatusBadRequest {
+		t.Errorf("outcome status = %d, want %d", out.Status, http.StatusBadRequest)
 	}
 }
 
@@ -545,7 +511,7 @@ func TestPRView_NoWorkspaceIsAnException(t *testing.T) {
 	}
 
 	work.Release()
-	var out *messages.Outcome
+	var out *outcome.Outcome
 	for _, m := range rec.sends {
 		if m.Kind == messages.OutMessageSettled {
 			out = m.Outcome
@@ -554,11 +520,8 @@ func TestPRView_NoWorkspaceIsAnException(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command settled no outcome")
 	}
-	if out.Status != messages.OutcomeFailed {
-		t.Fatalf("the status is %q, want failed", out.Status)
-	}
-	if out.Data["reason"] != "no_cwd" {
-		t.Errorf("the reason is %q, want no_cwd", out.Data["reason"])
+	if out.Status != http.StatusBadRequest {
+		t.Errorf("outcome status = %d, want %d", out.Status, http.StatusBadRequest)
 	}
 }
 
@@ -574,8 +537,8 @@ func TestPRView_WithoutANumberReadsTheBranch(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command settled no outcome")
 	}
-	if out.Status != messages.OutcomeOK {
-		t.Fatalf("the status is %q, want ok", out.Status)
+	if out.Status != http.StatusOK {
+		t.Fatalf("the status is %d, want %d", out.Status, http.StatusOK)
 	}
 	if out.Data["pr_number"] != "55" {
 		t.Errorf("Data[pr_number] = %q, want 55", out.Data["pr_number"])
@@ -640,11 +603,11 @@ func TestPRView_LockedStateAgreesWithTheOutcome(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command settled no outcome")
 	}
-	if out.Status != messages.OutcomeOK {
-		t.Fatalf("the status is %q, want ok", out.Status)
+	if out.Status != http.StatusOK {
+		t.Fatalf("the status is %d, want %d", out.Status, http.StatusOK)
 	}
-	if out.Data["mergeable"] != "1" {
-		t.Errorf("Data[mergeable] = %q, want 1", out.Data["mergeable"])
+	if out.Data["conflict"] != "false" {
+		t.Errorf("Data[conflict] = %q, want false", out.Data["conflict"])
 	}
 	if out.Data["pr_state"] != "open" {
 		t.Errorf("Data[pr_state] = %q, want open", out.Data["pr_state"])

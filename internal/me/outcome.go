@@ -2,36 +2,35 @@ package me
 
 import (
 	"maps"
+	"net/http"
 
-	"github.com/cnlangzi/nightme/pkg/wfe"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
-// fallbackErrorDescription is the last link of the description chain:
-// an exception with no summary still says that something broke.
-const fallbackErrorDescription = "the step failed"
+// fallbackStatusText is the last link of the description chain: a
+// failure with no words still says that something broke.
+const fallbackStatusText = "the step failed"
 
 // failedOutcome builds the outcome of a step that broke.
 //
-// The error description says what broke, and it is what tells the plan
-// that the flow cannot go on by itself: an outcome without one reads
-// as a normal result, and the plan goes on with the next step. The
-// facts the step produced are kept: they say what it did before it
-// broke.
-func failedOutcome(summary string, data map[string]string) wfe.Outcome {
-	if summary == "" {
-		summary = fallbackErrorDescription
+// The status says the step broke; the words say what broke. The facts
+// the step produced are kept: they say what it did before it broke.
+func failedOutcome(statusText string, data map[string]string) outcome.Outcome {
+	if statusText == "" {
+		statusText = fallbackStatusText
 	}
-	out := wfe.Outcome{
-		Status:  wfe.OutcomeFailed,
-		Summary: summary,
-		Data:    make(map[string]string, len(data)+1),
+	out := outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: statusText,
 	}
-	maps.Copy(out.Data, data)
-	out.Data[wfe.OutcomeKeyError] = summary
+	if len(data) > 0 {
+		out.Data = maps.Clone(data)
+	}
 	return out
 }
 
-// The summaries a skipped step carries: they name who skipped it.
+// The words a skipped step carries: they name who skipped it.
 const (
 	// agentSkippedSummary is what a step the agent skipped carries.
 	agentSkippedSummary = "the agent skipped this step"
@@ -42,26 +41,30 @@ const (
 // skippedOutcome builds the outcome of a step that was not completed by
 // the workflow's execution but whose plan moves past.
 //
-// The status is `noop`: the step did not complete, and a workflow's
-// `${{ steps.<id>.outputs.status }}` reads it as such — a later step
-// that is gated on this step having succeeded does not run.
+// The status is a success: the step did not break, it was passed over.
+// A workflow's `${{ steps.<id>.outputs.status }}` reads it as such — a
+// later step that is gated on this step having succeeded does not run.
 //
 // The facts the step produced are kept: they say what it did before it
-// was skipped. The error description goes: the step did not break, it
-// was passed over.
+// was skipped.
 //
 // The step's own record keeps its `Skipped` flag false: the step did
 // run, it did not complete.
-func skippedOutcome(out wfe.Outcome, summary string) wfe.Outcome {
-	skipped := wfe.Outcome{
-		Status:  wfe.OutcomeNoop,
-		Summary: summary,
+func skippedOutcome(out outcome.Outcome, statusText string) outcome.Outcome {
+	skipped := outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: statusText,
 	}
 	if len(out.Data) == 0 {
 		return skipped
 	}
-	skipped.Data = make(map[string]string, len(out.Data))
-	maps.Copy(skipped.Data, out.Data)
-	delete(skipped.Data, wfe.OutcomeKeyError)
+	skipped.Data = maps.Clone(out.Data)
 	return skipped
+}
+
+// noVerdict is the outcome of a command that reported none: the step
+// is still running, or it was passed over or interrupted.
+func noVerdict(statusText string) outcome.Outcome {
+	return outcome.Outcome{StatusText: statusText}
 }

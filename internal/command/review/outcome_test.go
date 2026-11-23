@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // groupReviewStarter is a fake starter that reports a fixed number
@@ -168,7 +170,7 @@ func (d *resumeDriver) Ping(context.Context) error { return nil }
 
 // waitOutcome waits for the settled message of a review and returns
 // the outcome it carries.
-func waitOutcome(t *testing.T, em *recordingEmitter, within time.Duration) *messages.Outcome {
+func waitOutcome(t *testing.T, em *recordingEmitter, within time.Duration) *outcome.Outcome {
 	t.Helper()
 	deadline := time.After(within)
 	for {
@@ -185,13 +187,13 @@ func waitOutcome(t *testing.T, em *recordingEmitter, within time.Duration) *mess
 }
 
 // assertOutcome checks the status and the Data keys of a review.
-func assertOutcome(t *testing.T, got *messages.Outcome, want messages.OutcomeStatus, wantData map[string]string) {
+func assertOutcome(t *testing.T, got *outcome.Outcome, want int, wantData map[string]string) {
 	t.Helper()
 	if got == nil {
 		t.Fatal("no settled outcome: the review reported nothing")
 	}
 	if got.Status != want {
-		t.Fatalf("outcome status = %s, want %s (outcome %+v)", got.Status, want, got)
+		t.Fatalf("outcome status = %d, want %d (outcome %+v)", got.Status, want, got)
 	}
 	for k, v := range wantData {
 		if got.Data[k] != v {
@@ -229,7 +231,7 @@ func TestReviewOutcome(t *testing.T) {
 		err    error
 		// allGroupsFail makes the fan-out fail with every group.
 		allGroupsFail bool
-		want          messages.OutcomeStatus
+		want          int
 		data          map[string]string
 		// wantErr says the outcome must carry an error description —
 		// the review's failures are exceptions, not normal branches.
@@ -242,16 +244,17 @@ func TestReviewOutcome(t *testing.T) {
 		{
 			name:   "all groups finished",
 			groups: 3,
-			want:   messages.OutcomeOK,
+			want:   http.StatusOK,
 			data: map[string]string{
 				"groups": "3", "unfinished": "0", "agent": "reviewer", "delivered": "true",
 			},
 		},
 		{
-			name:   "one group failed",
-			groups: 3,
-			failed: 1,
-			want:   messages.OutcomeIncomplete,
+			name:    "one group failed",
+			groups:  3,
+			failed:  1,
+			want:    http.StatusInternalServerError,
+			wantErr: true,
 			data: map[string]string{
 				"groups": "3", "unfinished": "1", "agent": "reviewer", "delivered": "false",
 			},
@@ -261,7 +264,8 @@ func TestReviewOutcome(t *testing.T) {
 			groups:        2,
 			failed:        2,
 			allGroupsFail: true,
-			want:          messages.OutcomeIncomplete,
+			want:          http.StatusInternalServerError,
+			wantErr:       true,
 			data: map[string]string{
 				"unfinished": "2", "agent": "reviewer", "delivered": "false",
 			},
@@ -269,16 +273,16 @@ func TestReviewOutcome(t *testing.T) {
 		{
 			name:         "no diff",
 			err:          agent.ErrNoDiff,
-			want:         messages.OutcomeFailed,
-			data:         map[string]string{"reason": "no_diff", "agent": "reviewer", "delivered": "false"},
+			want:         http.StatusNotFound,
+			data:         map[string]string{"agent": "reviewer", "delivered": "false"},
 			wantErr:      true,
 			noUnfinished: true,
 		},
 		{
 			name:         "not supported",
 			err:          agent.ErrReviewNotSupported,
-			want:         messages.OutcomeFailed,
-			data:         map[string]string{"reason": "not_supported", "agent": "reviewer", "delivered": "false"},
+			want:         http.StatusNotImplemented,
+			data:         map[string]string{"agent": "reviewer", "delivered": "false"},
 			wantErr:      true,
 			noUnfinished: true,
 		},
@@ -317,11 +321,11 @@ func TestReviewOutcome(t *testing.T) {
 			got := waitOutcome(t, em, 5*time.Second)
 			assertOutcome(t, got, tc.want, tc.data)
 			if tc.wantErr {
-				if got.Data["error"] == "" {
-					t.Errorf("an exception carries an error description, got none: %v", got.Data)
+				if got.Success {
+					t.Errorf("an exception is not a success: %v", got)
 				}
-			} else if desc, ok := got.Data["error"]; ok {
-				t.Errorf("a normal result carries no error description, got %q", desc)
+			} else if got.Exception() {
+				t.Errorf("a normal result is not an exception: %v", got)
 			}
 			if tc.noUnfinished {
 				if n, ok := got.Data["unfinished"]; ok {
@@ -362,7 +366,7 @@ func TestReviewContinueOutcome(t *testing.T) {
 		}
 		hold.Release()
 		got := waitOutcome(t, em, 5*time.Second)
-		assertOutcome(t, got, messages.OutcomeOK, map[string]string{
+		assertOutcome(t, got, http.StatusOK, map[string]string{
 			"continued_groups": "1",
 			"agent":            "reviewer",
 			"delivered":        "true",
@@ -399,7 +403,7 @@ func TestReviewContinueOutcome(t *testing.T) {
 		}
 		hold.Release()
 		got := waitOutcome(t, em, 5*time.Second)
-		assertOutcome(t, got, messages.OutcomeIncomplete, map[string]string{
+		assertOutcome(t, got, http.StatusInternalServerError, map[string]string{
 			"continued_groups": "2",
 			"unfinished":       "1",
 			"agent":            "reviewer",
@@ -437,7 +441,7 @@ func TestReviewContinueOutcome(t *testing.T) {
 		}
 		hold.Release()
 		got := waitOutcome(t, em, 5*time.Second)
-		assertOutcome(t, got, messages.OutcomeIncomplete, map[string]string{
+		assertOutcome(t, got, http.StatusInternalServerError, map[string]string{
 			"unfinished": "2",
 			"agent":      "reviewer",
 			"delivered":  "true",
@@ -470,6 +474,6 @@ func TestReviewContinueOutcome(t *testing.T) {
 		}
 		hold.Release()
 		got := waitOutcome(t, em, 5*time.Second)
-		assertOutcome(t, got, messages.OutcomeNoop, nil)
+		assertOutcome(t, got, http.StatusOK, nil)
 	})
 }

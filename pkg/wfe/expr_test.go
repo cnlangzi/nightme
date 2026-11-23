@@ -1,7 +1,10 @@
 package wfe
 
 import (
+	"net/http"
 	"testing"
+
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 func TestEvalString_NoExpression(t *testing.T) {
@@ -42,8 +45,9 @@ func TestEvalString_Steps(t *testing.T) {
 func TestEvalString_StepOutputs(t *testing.T) {
 	ec := ExprCtx{Steps: map[string]map[string]string{
 		"fix": {
-			"status":      "ok",
-			"summary":     "picked an issue",
+			"success":     "true",
+			"status":      "200",
+			"statusText":  "picked an issue",
 			"data.issue":  "42",
 			"data.branch": "nightme/issue-42",
 		},
@@ -52,15 +56,45 @@ func TestEvalString_StepOutputs(t *testing.T) {
 		expr string
 		want string
 	}{
-		{"${{ steps.fix.outputs.status }}", "ok"},
-		{"${{ steps.fix.outputs.summary }}", "picked an issue"},
+		{"${{ steps.fix.outputs.success }}", "true"},
+		{"${{ steps.fix.outputs.status }}", "200"},
+		{"${{ steps.fix.outputs.statusText }}", "picked an issue"},
 		{"${{ steps.fix.outputs.data.issue }}", "42"},
-		{"${{ steps.fix.status }}", "ok"},
+		{"${{ steps.fix.status }}", "200"},
 		{"${{ steps.fix.data.branch }}", "nightme/issue-42"},
 		{"${{ steps.fix.outputs.issue }}", "42"},
 		{"${{ steps.fix.outputs.data.missing }}", ""},
 	}
 	for _, tt := range tests {
+		if got := EvalString(tt.expr, ec); got != tt.want {
+			t.Errorf("%s = %q, want %q", tt.expr, got, tt.want)
+		}
+	}
+}
+
+// TestExprContext_RendersTheOutcome — the outcome reaches the
+// expressions under its four names: the verdict, the status, the
+// words and the facts.
+func TestExprContext_RendersTheOutcome(t *testing.T) {
+	wf := mustParse(t, threeStepYAML)
+	state := newRunState(wf)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "picked an issue",
+		Data:       map[string]string{"issue": "42"},
+	}, false)
+
+	ec := ExprContext(state)
+	for _, tt := range []struct {
+		expr string
+		want string
+	}{
+		{"${{ steps.one.outputs.success }}", "true"},
+		{"${{ steps.one.outputs.status }}", "200"},
+		{"${{ steps.one.outputs.statusText }}", "picked an issue"},
+		{"${{ steps.one.outputs.data.issue }}", "42"},
+	} {
 		if got := EvalString(tt.expr, ec); got != tt.want {
 			t.Errorf("%s = %q, want %q", tt.expr, got, tt.want)
 		}

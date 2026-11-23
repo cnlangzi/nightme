@@ -2,6 +2,7 @@ package me
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -9,7 +10,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/pkg/wfe"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // TestThePhaseLineNamesTheStep — a run that is working says which
@@ -391,7 +392,7 @@ func TestAResumeThatDecidesNothingPublishesTheState(t *testing.T) {
 	writeWorkflow(t, dir, "two", commitPushWorkflow)
 
 	svc, op := testService(t, dir, Config{})
-	pausedRun(t, svc, "commit", wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"}, true)
+	pausedRun(t, svc, "commit", outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "committed"}, true)
 
 	if _, err := svc.Resume(context.Background(), "obs-1", "om_resume", ""); err != nil {
 		t.Fatalf("resume: %v", err)
@@ -420,10 +421,11 @@ func TestANextPublishesTheState(t *testing.T) {
 
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}, MaxJudgments: 1})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{
-			Status:  messages.OutcomeFailed,
-			Summary: "the commit failed",
-			Data:    map[string]string{"error": "the commit failed", "reason": "conflict"},
+		{outcome: outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "the commit failed",
+			Data:       map[string]string{"error": "the commit failed", "reason": "conflict"},
 		}},
 		{open: true},
 	}
@@ -478,10 +480,11 @@ func TestALateStateOfAPauseDoesNotTakeTheCardOfTheRound(t *testing.T) {
 
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}, MaxJudgments: 1})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{
-			Status:  messages.OutcomeFailed,
-			Summary: "the commit failed",
-			Data:    map[string]string{"error": "the commit failed", "reason": "conflict"},
+		{outcome: outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "the commit failed",
+			Data:       map[string]string{"error": "the commit failed", "reason": "conflict"},
 		}},
 		{open: true},
 	}
@@ -658,9 +661,10 @@ func TestTheRateLimitPausePublishesTheState(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "429 Too Many Requests",
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "429 Too Many Requests",
 	}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{

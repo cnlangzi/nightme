@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/cnlangzi/nightme/pkg/wfe"
@@ -127,12 +128,9 @@ func (s *Service) renderSituation(ctx context.Context, r *run) string {
 	// its verdict on no step, so it is rendered here.
 	if action, ok := r.lastVerdict(); ok && !carriesOutcome(rendered, action) {
 		out := action.Outcome
-		fmt.Fprintf(&b, "\nlast outcome:\n  status: %s\n  summary: %s\n", out.Status, out.Summary)
+		fmt.Fprintf(&b, "\nlast outcome:\n  status: %d\n  summary: %s\n", out.Status, out.StatusText)
 		for _, k := range sortedNames(out.Data) {
 			fmt.Fprintf(&b, "  %s: %s\n", k, out.Data[k])
-		}
-		if hint := reasonHint(out.Data["reason"]); hint != "" {
-			fmt.Fprintf(&b, "  hint: %s\n", hint)
 		}
 	}
 	if transcripts := r.actionTranscripts(); len(transcripts) > 0 {
@@ -269,32 +267,21 @@ func (s *Service) renderRoundSteps(r *run) (string, map[string]wfe.StepState) {
 	return b.String(), rendered
 }
 
-// writeOutcomeFacts renders what a step produced: its summary, its
-// error, the facts it reported and the hint its reason carries.
+// writeOutcomeFacts renders what a step produced: its words, the
+// facts it reported and the status that says which branch it took.
 //
 // The facts are the evidence the deciding agent needs: why a step
-// ended the way it did is rarely in the status alone. The error comes
-// first among them: its presence is what tells the agent that the
-// step broke, and a normal result carries none.
+// ended the way it did is rarely in the status alone.
 func writeOutcomeFacts(b *strings.Builder, st wfe.StepState) {
 	if st.ID == "" || st.Pending {
 		return
 	}
 	out := st.Outcome
-	if out.Summary != "" {
-		fmt.Fprintf(b, "    %s\n", out.Summary)
-	}
-	if desc := out.Data[wfe.OutcomeKeyError]; desc != "" {
-		fmt.Fprintf(b, "    error: %s\n", desc)
+	if out.StatusText != "" {
+		fmt.Fprintf(b, "    %s\n", out.StatusText)
 	}
 	for _, k := range sortedNames(out.Data) {
-		if k == wfe.OutcomeKeyError {
-			continue
-		}
 		fmt.Fprintf(b, "    %s: %s\n", k, out.Data[k])
-	}
-	if hint := reasonHint(out.Data["reason"]); hint != "" {
-		fmt.Fprintf(b, "    hint: %s\n", hint)
 	}
 }
 
@@ -310,7 +297,7 @@ func carriesOutcome(rendered map[string]wfe.StepState, action wfe.ActionRecord) 
 		return false
 	}
 	return st.Outcome.Status == action.Outcome.Status &&
-		st.Outcome.Summary == action.Outcome.Summary &&
+		st.Outcome.StatusText == action.Outcome.StatusText &&
 		maps.Equal(st.Outcome.Data, action.Outcome.Data)
 }
 
@@ -324,7 +311,7 @@ func stepStateText(st wfe.StepState) string {
 	case st.Skipped:
 		return "skipped"
 	default:
-		return string(st.Outcome.Status)
+		return strconv.Itoa(st.Outcome.Status)
 	}
 }
 
@@ -338,10 +325,10 @@ func (s *Service) situationReason(r *run) string {
 	switch {
 	case prevStepReason.MatchString(reason):
 		m := prevStepReason.FindStringSubmatch(reason)
-		return withDetail(fmt.Sprintf("step %s ended as %s", m[1], m[2]), m[3])
+		return withDetail(fmt.Sprintf("step %s ended with status %s", m[1], m[2]), m[3])
 	case lastStepReason.MatchString(reason):
 		m := lastStepReason.FindStringSubmatch(reason)
-		return withDetail(fmt.Sprintf("the plan is over and step %s ended as %s", m[1], m[2]), m[3])
+		return withDetail(fmt.Sprintf("the plan is over and step %s ended with status %s", m[1], m[2]), m[3])
 	case readyStepsReason.MatchString(reason):
 		m := readyStepsReason.FindStringSubmatch(reason)
 		return fmt.Sprintf("%s steps are ready and the plan cannot pick one", m[1])
@@ -366,8 +353,8 @@ func (s *Service) situationReason(r *run) string {
 // engine rides along: it says what broke, and it is empty when the
 // reason carries none.
 var (
-	prevStepReason     = regexp.MustCompile(`^the previous step "([^"]+)" ended as "([^"]+)"(?:: (.*))?$`)
-	lastStepReason     = regexp.MustCompile(`^the plan is exhausted and the last step "([^"]+)" ended as "([^"]+)"(?:: (.*))?$`)
+	prevStepReason     = regexp.MustCompile(`^the previous step "([^"]+)" ended with status (\d+)(?:: (.*))?$`)
+	lastStepReason     = regexp.MustCompile(`^the plan is exhausted and the last step "([^"]+)" ended with status (\d+)(?:: (.*))?$`)
 	readyStepsReason   = regexp.MustCompile(`^(\d+) steps are ready`)
 	stillRunningReason = regexp.MustCompile(`^the step "([^"]+)" is still running$`)
 	budgetReason       = regexp.MustCompile(`^the step "([^"]+)" already ran \d+ times, its limit is \d+$`)
@@ -380,51 +367,4 @@ func withDetail(sentence, detail string) string {
 		return sentence
 	}
 	return sentence + ": " + detail
-}
-
-// reasonHints explain the reason codes a command reports.
-//
-// The codes are stable (see docs/me.md); the hint says what the code
-// means in the words of the work. Only the code in play is shown.
-var reasonHints = map[string]string{
-	"agent_error":           "the agent did not run, or it produced no usable output.",
-	"not_committed":         "the agent finished, but nothing was committed.",
-	"nothing_to_commit":     "the working tree carries no changes: there was nothing to commit.",
-	"nothing_to_push":       "the branch carries no commit the remote does not have: there was nothing to push.",
-	"no_changes":            "the agent's turn ended without leaving a single change in the worktree.",
-	"not_fixed":             "the review found problems, and none of them were fixed.",
-	"conflict":              "the working tree has unresolved conflicts.",
-	"dirty":                 "the working tree has changes that were not committed.",
-	"detached":              "HEAD is detached: the branch has to be checked out first.",
-	"no_commits":            "the branch has no commit beyond its base.",
-	"no_diff":               "there is no diff in the working tree: there was nothing to review.",
-	"no_candidate":          "the queue of assigned issues was empty. The workflow backs off with its wait step.",
-	"provider_error":        "the git platform could not be reached.",
-	"merge_conflict":        "the pull request conflicts with its base: it cannot be merged as it stands.",
-	"pr_behind":             "the pull request's branch is behind its base.",
-	"pr_blocked":            "the platform holds the pull request back: it needs an approval, a passing check, or no longer a draft.",
-	"state_unknown":         "the platform did not compute whether the pull request can be merged.",
-	"pr_closed":             "the pull request is no longer open: it was closed or merged.",
-	"no_pr":                 "the branch has no open pull request.",
-	"pr_not_found":          "no pull request carries the number that was given.",
-	"dispatch_failed":       "the worktree was made, but the work never reached the agent.",
-	"not_supported":         "the agent cannot do this.",
-	"unknown_agent":         "the agent's name is not registered.",
-	"no_agent":              "no agent is selected.",
-	"no_remote":             "the repository has no origin remote.",
-	"already_active":        "another fix is already running in this chat.",
-	"workspace_unreachable": "the workspace directory is gone.",
-	"not_found":             "no worktree branch matched the name that was given.",
-	"ambiguous":             "the name matched several worktree branches: the full branch name is needed.",
-	"no_run":                "this chat has no run in it.",
-	"not_paused":            "the run is waiting for an answer: it asked a question of its own.",
-}
-
-// reasonHint explains a reason code, or returns an empty string when
-// the code is not one the run knows.
-func reasonHint(code string) string {
-	if code == "" {
-		return ""
-	}
-	return reasonHints[code]
 }

@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -47,7 +48,7 @@ const (
 //   - the pull request cannot be merged yet — a conclusion, not a
 //     breakdown: the outcome is `failed` without an error
 //     description, so a workflow keeps going and branches on
-//     Data["conflict"];
+//     Data[BoolKeyConflict];
 //   - the platform cannot tell — an exception: the outcome carries
 //     an error description and the run hands it to the model.
 func dispatchPRView(
@@ -69,7 +70,7 @@ func dispatchPRView(
 		// platform). Echo verbatim.
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %v", err),
-			command.FailedOutcome("provider_error", "the git host could not be resolved")), nil
+			command.FailedOutcome(http.StatusServiceUnavailable, "the git host could not be resolved")), nil
 	}
 
 	if number <= 0 {
@@ -77,14 +78,13 @@ func dispatchPRView(
 		if err != nil {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ %v", err),
-				command.FailedOutcome("provider_error",
-					"the pull requests could not be listed", err.Error())), nil
+				command.FailedOutcome(http.StatusServiceUnavailable, err.Error())), nil
 		}
 		if existing == nil {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("✨ no open pull request for %s", c.Branch),
-				command.NoopOutcome("the branch has no open pull request",
-					map[string]string{"reason": "no_pr"})), nil
+				command.FailedOutcome(http.StatusNotFound,
+					"the branch has no open pull request")), nil
 		}
 		number = existing.Number
 	}
@@ -94,12 +94,11 @@ func dispatchPRView(
 		if errors.Is(err, ErrPRNotFound) {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ no pull request #%d in %s/%s", number, owner, repo),
-				command.FailedOutcome("pr_not_found", "the pull request does not exist")), nil
+				command.FailedOutcome(http.StatusNotFound, "the pull request does not exist")), nil
 		}
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %v", err),
-			command.FailedOutcome("provider_error",
-				"the merge state could not be read", err.Error())), nil
+			command.FailedOutcome(http.StatusServiceUnavailable, err.Error())), nil
 	}
 
 	return replyPRViewOutcome(ctx, cs.Emitter(), chatID, messageID, state), nil
@@ -151,14 +150,15 @@ func readPRMergeState(
 // replyPRViewOutcome turns a merge state into the card and the
 // structured outcome.
 //
-// The card and the outcome are two faces of the same decision: `ok`
-// says the pull request can be merged and the card says the same
-// thing. A pull request that cannot be merged is a conclusion, not
-// a breakdown — the outcome carries no error description, so a
-// workflow keeps going and branches on Data["conflict"] instead.
+// The card and the outcome are two faces of the same decision. A
+// pull request that cannot be merged is a conclusion, not a
+// breakdown: the status is a 2xx either way, and the facts —
+// merge_state and conflict — say which case it is. A pull request that cannot be merged is a conclusion, not a
+// breakdown — the status is a success, so a workflow keeps going and
+// branches on the facts instead.
 //
-// The rule that ties the two together: the status is `ok` if and
-// only if Data["mergeable"] is "1".
+// The facts that say which case it is: `merge_state` (mergeable /
+// conflicting / behind / blocked / unknown) and `conflict`.
 func replyPRViewOutcome(
 	ctx context.Context,
 	em messages.Emitter,
@@ -166,16 +166,15 @@ func replyPRViewOutcome(
 	state *PRMergeState,
 ) *Result {
 	data := map[string]string{
-		"pr_number": strconv.Itoa(state.Number),
-		"pr_url":    state.URL,
+		KeyPRNumber: strconv.Itoa(state.Number),
+		KeyPRURL:    state.URL,
 		// The state vocabulary is open / closed / merged: whatever
 		// the platform called the pull request, the command reports
 		// one of the three.
-		"pr_state":    prStateOrOpen(state.State),
-		"base_branch": state.Base,
-		"mergeable":   "0",
-		"conflict":    "0",
-		"merge_state": string(state.Verdict),
+		KeyPRState:      prStateOrOpen(state.State),
+		KeyBaseBranch:   state.Base,
+		BoolKeyConflict: "false",
+		KeyMergeState:   string(state.Verdict),
 	}
 
 	// A pull request that was closed or merged is never going to
@@ -183,35 +182,29 @@ func replyPRViewOutcome(
 	// it left the open state. Nothing is broken and nothing is
 	// waiting: the request has nothing to do.
 	if state.State == "closed" || state.State == "merged" {
-		data["reason"] = "pr_closed"
 		return replyOutcome(ctx, em, chatID, messageID,
 			renderPRViewCard(prViewTitle(state), state, ""),
-			command.NoopOutcome(prViewSummary(state), data))
+			command.SuccessOutcome(prViewSummary(state), data))
 	}
 
 	switch state.Verdict {
 	case PRMergeMergeable:
-		data["mergeable"] = "1"
 		return replyOutcome(ctx, em, chatID, messageID,
 			renderPRViewCard(prViewTitle(state), state, ""),
-			messages.Outcome{
-				Status:  messages.OutcomeOK,
-				Summary: prViewSummary(state),
-				Data:    data,
-			})
+			command.SuccessOutcome(prViewSummary(state), data))
 	case PRMergeConflicting:
-		data["conflict"] = "1"
+		data[BoolKeyConflict] = "true"
 		return replyOutcome(ctx, em, chatID, messageID,
 			renderPRViewCard(prViewTitle(state), state, prViewHint(state)),
-			command.BranchOutcome("merge_conflict", prViewSummary(state), data))
+			command.SuccessOutcome(prViewSummary(state), data))
 	case PRMergeBehind:
 		return replyOutcome(ctx, em, chatID, messageID,
 			renderPRViewCard(prViewTitle(state), state, prViewHint(state)),
-			command.BranchOutcome("pr_behind", prViewSummary(state), data))
+			command.SuccessOutcome(prViewSummary(state), data))
 	case PRMergeBlocked:
 		return replyOutcome(ctx, em, chatID, messageID,
 			renderPRViewCard(prViewTitle(state), state, ""),
-			command.BranchOutcome("pr_blocked", prViewSummary(state), data))
+			command.SuccessOutcome(prViewSummary(state), data))
 	}
 
 	// The platform never computed the state. That is a breakdown,
@@ -219,9 +212,9 @@ func replyPRViewOutcome(
 	// request merges, so the run hands the question to the model.
 	return replyOutcome(ctx, em, chatID, messageID,
 		renderPRViewCard(prViewTitle(state), state, ""),
-		command.FailedOutcomeData("state_unknown",
-			prViewSummary(state), data,
-			fmt.Sprintf("the platform did not compute the merge state of PR #%d", state.Number)))
+		command.FailedOutcomeData(http.StatusServiceUnavailable,
+			fmt.Sprintf("the platform did not compute the merge state of PR #%d", state.Number),
+			data))
 }
 
 // prViewVerdict names the decision once.

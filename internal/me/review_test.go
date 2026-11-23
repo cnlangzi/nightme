@@ -3,11 +3,12 @@ package me
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -52,8 +53,8 @@ jobs:
 	// the agent is asked what to do. The second command never settles,
 	// so the run is still going while the test looks at the state.
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "it failed"}},
-		{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}, open: true},
+		{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "it failed"}},
+		{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "still going"}, open: true},
 	}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -62,7 +63,7 @@ jobs:
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitSent(t, op, "/two")
+	waitSent(t, op, "/two -c")
 
 	svc.mu.Lock()
 	r := svc.active["obs-1"]
@@ -147,7 +148,7 @@ jobs:
 	state := r.state
 	r.mu.Unlock()
 	for _, st := range state.Steps {
-		if st.Outcome.Status == wfe.OutcomeFailed {
+		if st.Outcome.Status == http.StatusInternalServerError {
 			t.Errorf("the step %q was recorded as failed after the run was stopped", st.ID)
 		}
 	}

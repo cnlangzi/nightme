@@ -2,10 +2,12 @@ package me
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // sleepingWorkflow is a workflow whose job waits between its rounds.
@@ -169,8 +171,8 @@ jobs:
 	// The models must not be called: the run ends on its own.
 	svc, op := testService(t, dir, noModels())
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "there was nothing to fix"}},
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "there was nothing to fix"}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "there was nothing to fix"}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "there was nothing to fix"}},
 	}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -182,7 +184,7 @@ jobs:
 
 	var found bool
 	for _, m := range op.EmittedOf(messages.OutResult) {
-		if m.Result == "repeat is over" {
+		if m.Result == "repeat is complete" {
 			found = true
 		}
 	}

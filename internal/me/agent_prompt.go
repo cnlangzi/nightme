@@ -20,7 +20,7 @@ func (s *Service) systemPrompt(r *run) string {
 
 	b.WriteString("## When you are called\n")
 	b.WriteString("The engine runs the steps by itself as long as each one succeeds. You are called when a step raised an exception: the flow cannot go on by itself, and the situation report says what broke. Repair the gap and give the control back — the workflow continues without you.\n")
-	b.WriteString("An outcome that carries no error is a normal result: the workflow moves on by itself, and there is nothing there for you to repair. You are here for the steps that broke.\n\n")
+	b.WriteString("A 2xx is a normal result: the workflow moves on by itself, and there is nothing there for you to repair. You are here for the steps that broke.\n\n")
 
 	b.WriteString("## The workflow\n")
 	b.WriteString("The title is the objective. The steps are the owner's procedure for reaching it; each step carries a description: what the step is, which outcome is its normal branch and what to do when it is not. A step's description is the owner's instruction for that step. The description wins over the ready set and over your own judgment. Follow their order. The nightme commands are yours to run as fixes, but only a step's own run moves the work on.\n")
@@ -43,7 +43,7 @@ func (s *Service) systemPrompt(r *run) string {
 		b.WriteString("\nThis workflow does not allow instructions; fix things with nightme commands.\n")
 	}
 	b.WriteString("\n## How to work\n")
-	b.WriteString("1. Read the report: the outcome, its error, the reason and the transcript.\n")
+	b.WriteString("1. Read the report: the outcome — its status, its words and its facts — and the transcript.\n")
 	b.WriteString("2. Find the cause of the error.")
 	if s.hasBrain(r) {
 		b.WriteString(" Ask agent only for what the report does not explain.")
@@ -56,8 +56,8 @@ func (s *Service) systemPrompt(r *run) string {
 	b.WriteString("5. Give the control back. The engine decides what runs next. If the step breaks again, the engine comes back to you.\n")
 
 	b.WriteString("\n## When a step produced nothing\n")
-	b.WriteString("An outcome without an error is a normal result — the workflow goes on by itself, and there is nothing to repair. Two things are still yours:\n")
-	b.WriteString("- An outcome whose verdict nobody reported: check the facts before you trust it.\n")
+	b.WriteString("A 2xx is a normal result — the workflow goes on by itself, and there is nothing to repair. Two things are still yours:\n")
+	b.WriteString("- An outcome whose verdict nobody reported (status 0): check the facts before you trust it.\n")
 	b.WriteString("- Work that is still running in the background: call wait, then look again.\n")
 
 	b.WriteString("\n## What is not yours to do\n")
@@ -75,7 +75,9 @@ func (s *Service) systemPrompt(r *run) string {
 	b.WriteString("- A job that repeats until the run is stopped has no end of its own: get it back on course and let it continue.\n")
 
 	b.WriteString("\n## Outcomes\n")
-	b.WriteString("ok means the step did its job. noop means there was nothing to do: the step was skipped, or the world already satisfied it. A failed without an error description is a normal result: the workflow goes on by itself. A failed that carries an error description means the step broke, and the reason and the error say how. incomplete means part of it is still open. cancelled means somebody stopped it; timeout means it ran out of time. unknown means nobody reported a verdict — check the facts before you trust or retry it. waiting means the command is still running and needs an answer or an instruction. error means your call was refused; the message says why.\n")
+	b.WriteString("An outcome carries a status, one line of words and the facts the command produced. The status is an HTTP status: 2xx means the step did its job or there was nothing to do, 4xx and 5xx mean it broke. 400 is a request the command refused (a wrong flag, a missing argument), 404 is something that is not there (the issue, the pull request, the continuation), 409 is a conflict with the world as it is (a branch that exists, a dirty worktree), and a 5xx is the world or the platform failing. 499 is somebody stopping the step, 408 is it running out of time, and status 0 means nobody reported a verdict — check the facts before you trust or retry it.\n")
+	b.WriteString("The facts say which case it was: a step that found nothing to do carries no work of its own, a step that did the work carries what it did. Read the facts, not the words alone.\n")
+	b.WriteString("waiting means the command is still running and needs an answer or an instruction. error means your call was refused; the message says why.\n")
 	b.WriteString("The outcome is the evidence; the transcript explains it.\n")
 
 	b.WriteString("\nAlways act through a tool.\n")

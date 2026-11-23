@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -235,33 +236,35 @@ func jobsValue(jobs []string, rounds map[string]int) string {
 	return strings.Join(parts, " · ")
 }
 
-// outcomeStatusOrder is the order the counts of the actions follow.
-var outcomeStatusOrder = []wfe.OutcomeStatus{
-	wfe.OutcomeOK,
-	wfe.OutcomeNoop,
-	wfe.OutcomeIncomplete,
-	wfe.OutcomeFailed,
-	wfe.OutcomeCancelled,
-	wfe.OutcomeTimeout,
-	wfe.OutcomeUnknown,
-}
-
 // actionsValue renders what the run did and how the actions ended.
+//
+// The counts say how many actions broke and how many were stopped:
+// the status of every action is in the record, and the card wants the
+// two numbers an operator reads.
+//
+// An action that reported no verdict — a budget reset, a turn without
+// a tool call — is neither: it is the run's own bookkeeping.
 func actionsValue(history []wfe.ActionRecord) string {
-	counts := map[wfe.OutcomeStatus]int{}
+	ok, failed, cancelled := 0, 0, 0
 	for _, rec := range history {
-		status := rec.Outcome.Status
-		if status == "" {
-			status = wfe.OutcomeUnknown
+		switch {
+		case rec.Outcome.Status == outcome.StatusClientClosedRequest:
+			cancelled++
+		case isErrorStatus(rec.Outcome.Status):
+			failed++
+		default:
+			ok++
 		}
-		counts[status]++
 	}
-	parts := make([]string, 0, len(counts))
-	for _, status := range outcomeStatusOrder {
-		if counts[status] == 0 {
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("%d %s", counts[status], status))
+	parts := make([]string, 0, 3)
+	if ok > 0 {
+		parts = append(parts, fmt.Sprintf("%d ok", ok))
+	}
+	if failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed", failed))
+	}
+	if cancelled > 0 {
+		parts = append(parts, fmt.Sprintf("%d cancelled", cancelled))
 	}
 	value := strconv.Itoa(len(history))
 	if len(parts) > 0 {
@@ -576,7 +579,7 @@ func currentNode(it iteration, several bool, width int, at time.Time) string {
 // icon of its outcome, what it came to and how long it took.
 func roundEndedLine(rec roundRecord) string {
 	line := "ended: [ " + outcomeIcon(rec.Outcome.Status) + " ]"
-	if summary := strings.TrimSpace(rec.Outcome.Summary); summary != "" {
+	if summary := strings.TrimSpace(rec.Outcome.StatusText); summary != "" {
 		line += " " + summary
 	}
 	return line + " · " + durationText(rec.EndedAt.Sub(rec.StartedAt))
@@ -643,14 +646,14 @@ func abbrevOneDecimal(v float64, unit string) string {
 // went wrong, `x` for one that was stopped and `?` for one that
 // reported no verdict. Every icon is one character wide, so an icon
 // never shifts the rest of the row.
-func outcomeIcon(status wfe.OutcomeStatus) string {
-	switch status {
-	case wfe.OutcomeOK, wfe.OutcomeNoop:
+func outcomeIcon(status int) string {
+	switch {
+	case status >= 200 && status < 300:
 		return "v"
-	case wfe.OutcomeFailed, wfe.OutcomeIncomplete, wfe.OutcomeTimeout:
-		return "!"
-	case wfe.OutcomeCancelled:
+	case status == outcome.StatusClientClosedRequest:
 		return "x"
+	case status >= 400:
+		return "!"
 	}
 	return "?"
 }
@@ -749,11 +752,11 @@ func taskStatusOf(st wfe.StepState) agent.AgentTaskStatus {
 		return agent.TaskSkipped
 	case st.Pending:
 		return agent.TaskInProgress
-	case st.Outcome.Status == wfe.OutcomeNoop:
+	case isSkippedOutcome(st.Outcome):
 		return agent.TaskSkipped
 	case st.Outcome.Succeeded():
 		return agent.TaskCompleted
-	case st.Outcome.Status == wfe.OutcomeCancelled:
+	case st.Outcome.Status == outcome.StatusClientClosedRequest:
 		return agent.TaskCancelled
 	}
 	return agent.TaskFailed
@@ -790,6 +793,10 @@ func (r *run) stepChances(stepID string, remaining wfe.Remaining) (int, bool) {
 // The error of a step that broke is on every row: a step that carries
 // one is not a step that was passed over.
 //
+// The words of the outcome are the one line that says what happened:
+// they are the summary of a step that worked and the error of a step
+// that broke.
+//
 // The detail is cut short: a step that reports a whole build log as
 // its summary would otherwise make the row unreadable.
 func stepDetail(st wfe.StepState, status agent.AgentTaskStatus, chances int, hasChances bool) string {
@@ -799,9 +806,6 @@ func stepDetail(st wfe.StepState, status agent.AgentTaskStatus, chances int, has
 		if summary := branchlessSummary(st.Outcome); summary != "" {
 			parts = append(parts, summary)
 		}
-	}
-	if errText := st.Outcome.Data[wfe.OutcomeKeyError]; errText != "" {
-		parts = append(parts, errText)
 	}
 	// The chances matter for the steps that may still run: a step that
 	// is over is over, whatever its budget was.
@@ -818,8 +822,8 @@ func stepDetail(st wfe.StepState, status agent.AgentTaskStatus, chances int, has
 // its end. The card the operator read names the branch, so the suffix
 // is dropped — a summary that does not end with the branch is left
 // alone.
-func branchlessSummary(out wfe.Outcome) string {
-	summary := strings.TrimSpace(out.Summary)
+func branchlessSummary(out outcome.Outcome) string {
+	summary := strings.TrimSpace(out.StatusText)
 	branch := strings.TrimSpace(out.Data[outcomeKeyBranch])
 	if branch == "" {
 		return summary

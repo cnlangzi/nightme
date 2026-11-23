@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -426,7 +428,7 @@ func TestTheSituationReport_CarriesTheRepair(t *testing.T) {
 
 	r.setJudgment(`the previous step "commit" ended as "failed"`)
 	r.setJudgmentStep("commit")
-	r.record(wfe.ActionKindStall, "", "commit", wfe.Outcome{Status: wfe.OutcomeUnknown})
+	r.record(wfe.ActionKindStall, "", "commit", outcome.Outcome{Status: 0})
 
 	report := svc.renderSituation(context.Background(), r)
 	for _, want := range []string{
@@ -720,9 +722,10 @@ func TestBudget_AnInstructionCostsAChance(t *testing.T) {
 
 	provider := &alwaysInstruct{}
 	svc, op := testService(t, dir, Config{Provider: provider, MaxJudgments: 3})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "the command failed",
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the command failed",
 	}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -750,9 +753,10 @@ func TestBudget_TheConversationKeepsOneSituationReport(t *testing.T) {
 
 	provider := &alwaysProse{}
 	svc, op := testService(t, dir, Config{Provider: provider, MaxJudgments: 6})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "the command failed",
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the command failed",
 	}}}
 
 	runID, _, err := svc.StartWorkflow(context.Background(), Request{

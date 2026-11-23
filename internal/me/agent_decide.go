@@ -207,18 +207,18 @@ func (s *Service) decisionState(r *run) string {
 		b.WriteString("  (nothing yet)\n")
 	}
 	for i, rec := range history {
-		fmt.Fprintf(&b, "  %d. %s %s -> %s: %s\n", i+1, rec.Kind, rec.Command, rec.Outcome.Status, rec.Outcome.Summary)
+		fmt.Fprintf(&b, "  %d. %s %s -> %d: %s\n", i+1, rec.Kind, rec.Command, rec.Outcome.Status, rec.Outcome.StatusText)
 	}
 	if len(history) > 0 {
 		last := history[len(history)-1]
-		fmt.Fprintf(&b, "last action:\n  status: %s\n  summary: %s\n", last.Outcome.Status, last.Outcome.Summary)
+		fmt.Fprintf(&b, "last action:\n  status: %d\n  summary: %s\n", last.Outcome.Status, last.Outcome.StatusText)
 		if len(last.Outcome.Data) > 0 {
 			b.WriteString("  data:\n")
 			for k, v := range last.Outcome.Data {
 				fmt.Fprintf(&b, "    %s: %s\n", k, v)
 			}
 		}
-		if rateLimit(last.Outcome.Summary, lastTranscript, last.Outcome.Data) {
+		if rateLimit(last.Outcome.Status, last.Outcome.StatusText, lastTranscript, last.Outcome.Data) {
 			b.WriteString("the agent is rate limited (429) — it is throttled. The run pauses and waits for the operator; do not pick another step yet.\n")
 		}
 	}
@@ -239,7 +239,7 @@ func (s *Service) lastOutcomeUnknown(r *run) bool {
 	if len(history) == 0 {
 		return false
 	}
-	return history[len(history)-1].Outcome.Status == wfe.OutcomeUnknown
+	return history[len(history)-1].Outcome.Status == 0
 }
 
 // recordSynthetic appends a decision to the conversation as a

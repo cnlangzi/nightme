@@ -12,12 +12,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // textAndToolCall builds an assistant message that says something and
@@ -274,7 +276,7 @@ func TestRun_KeepsTheCallAndItsResultUnderOneCard(t *testing.T) {
 	// The run opens another session while the call runs.
 	svc.openDecisionSession(context.Background(), r)
 	svc.publishToolEnd(context.Background(), r, sess, call,
-		stepResult{Status: "ok", Summary: "committed"}, nil)
+		stepResult{Outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "committed"}}, nil)
 
 	starts := op.EmittedOf(messages.OutToolStart)
 	ends := op.EmittedOf(messages.OutToolEnd)

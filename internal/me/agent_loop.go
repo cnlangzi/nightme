@@ -616,7 +616,7 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 		}
 		tool, args := s.syntheticCall(r, dec.Next)
 		s.recordSynthetic(r, tool, args)
-		outcome, err := s.runStep(ctx, r, dec.Next)
+		verdict, err := s.runStep(ctx, r, dec.Next)
 		if err != nil {
 			if isToolError(err) {
 				// The command could not run: the chat model takes over
@@ -625,7 +625,7 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 			}
 			return sys1None, err
 		}
-		s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: tool}, outcome, !outcomeSucceeded(outcome.Status))
+		s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: tool}, verdict, !verdict.Succeeded())
 		s.refreshRun(r)
 		return sys1Act, nil
 	}
@@ -666,7 +666,7 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command string) (bool
 	}
 	tool, args := s.syntheticCall(r, command)
 	s.recordSynthetic(r, tool, args)
-	outcome, err := s.runStep(ctx, r, command)
+	verdict, err := s.runStep(ctx, r, command)
 	if err != nil {
 		if isToolError(err) {
 			// The command could not run: the user is told and the run
@@ -677,7 +677,7 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command string) (bool
 		}
 		return false, err
 	}
-	s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: tool}, outcome, !outcomeSucceeded(outcome.Status))
+	s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: tool}, verdict, !verdict.Succeeded())
 	s.refreshRun(r)
 	return false, nil
 }

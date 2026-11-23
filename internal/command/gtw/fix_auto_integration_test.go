@@ -12,6 +12,7 @@ package gtw
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // TestFixAuto_PicksAssignedIssue pins the automatic mode end to
@@ -231,7 +233,7 @@ func TestFixAuto_NoCandidate_OutcomeCarriesWakeUp(t *testing.T) {
 	}
 	work.Release()
 
-	var settled *messages.Outcome
+	var settled *outcome.Outcome
 	for _, m := range rig.rec.sends {
 		if m.Kind == messages.OutMessageSettled {
 			settled = m.Outcome
@@ -240,11 +242,13 @@ func TestFixAuto_NoCandidate_OutcomeCarriesWakeUp(t *testing.T) {
 	if settled == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if settled.Status != messages.OutcomeFailed {
-		t.Errorf("outcome status = %q, want failed", settled.Status)
+	if settled.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want %d", settled.Status, http.StatusOK)
+	}
+	if _, ok := settled.Data[KeyIssue]; ok {
+		t.Error("the empty queue carries no issue")
 	}
 	want := map[string]string{
-		"reason":        "no_candidate",
 		"wake_after":    "5m",
 		"candidates":    "0",
 		"blocked":       "0",
@@ -256,10 +260,10 @@ func TestFixAuto_NoCandidate_OutcomeCarriesWakeUp(t *testing.T) {
 			t.Errorf("outcome Data[%q] = %q, want %q", k, settled.Data[k], v)
 		}
 	}
-	// The queue was empty — nothing broke, so the outcome carries no
-	// error description.
-	if desc, ok := settled.Data["error"]; ok {
-		t.Errorf("an empty queue is a normal branch: it carries no error description, got %q", desc)
+	// The queue was empty — nothing broke, so the outcome is a
+	// normal branch.
+	if settled.Exception() {
+		t.Errorf("an empty queue is a normal branch: %v", settled)
 	}
 }
 

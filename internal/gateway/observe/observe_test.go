@@ -2,10 +2,12 @@ package observe
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // TestTracker_OnlyRegisteredMessagesAreTracked — the tracker holds
@@ -150,9 +152,10 @@ func TestTracker_ASettleClosesTheWatch(t *testing.T) {
 		ChatID:  "oc_test",
 		Kind:    messages.OutMessageSettled,
 		ReplyTo: "om_1",
-		Outcome: &messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "committed",
+		Outcome: &outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "committed",
 		},
 	})
 
@@ -168,8 +171,8 @@ func TestTracker_ASettleClosesTheWatch(t *testing.T) {
 	if last.Phase != PhaseSettled {
 		t.Fatalf("phase = %q, want %q", last.Phase, PhaseSettled)
 	}
-	if last.Outcome.Summary != "committed" {
-		t.Fatalf("outcome = %q, want committed", last.Outcome.Summary)
+	if last.Outcome.StatusText != "committed" {
+		t.Fatalf("outcome = %q, want committed", last.Outcome.StatusText)
 	}
 }
 

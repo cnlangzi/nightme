@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"net/http"
 	"runtime"
 	"strings"
 	"testing"
@@ -62,9 +63,8 @@ func TestReviewBaseUnknown(t *testing.T) {
 			hold.Release()
 
 			got := waitOutcome(t, em, 5*time.Second)
-			assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
-				"reason": "base_unknown",
-				"agent":  "reviewer",
+			assertOutcome(t, got, http.StatusInternalServerError, map[string]string{
+				"agent": "reviewer",
 			})
 
 			reply := findReply(em.messages(), "could not determine the base branch")

@@ -22,6 +22,7 @@ package command_test
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -44,6 +45,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/gatewaytest"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/shell"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // ─── stub agent ─────────────────────────────────────────────────────
@@ -412,7 +414,7 @@ func TestSettle_QueuedTurn_SettlesOnlyAfterTheTurnEnds(t *testing.T) {
 	if got[0].ReplyTo != "om_settle_queue" {
 		t.Errorf("settled ReplyTo = %q, want om_settle_queue", got[0].ReplyTo)
 	}
-	if got[0].Outcome == nil || got[0].Outcome.Status != messages.OutcomeOK {
+	if got[0].Outcome == nil || got[0].Outcome.Status != http.StatusOK {
 		t.Errorf("settled outcome = %+v, want ok", got[0].Outcome)
 	}
 }
@@ -455,7 +457,7 @@ func TestSettle_Review_SettlesOnlyAfterTheInjectedTurnEnds(t *testing.T) {
 	h.openTurnGate()
 
 	got := h.assertOneSettled(t, "om_settle_review", 3*time.Second)
-	if got.Outcome == nil || got.Outcome.Status != messages.OutcomeOK {
+	if got.Outcome == nil || got.Outcome.Status != http.StatusOK {
 		t.Errorf("settled outcome = %+v, want ok", got.Outcome)
 	}
 }
@@ -505,7 +507,7 @@ func TestSettle_StoppedTurn_SettlesAsCancelled(t *testing.T) {
 	// as cancelled. The /stop command's own message settles on its
 	// own — it is a different inbound.
 	queued := h.waitSettledFor(t, "om_settle_queued", 3*time.Second)
-	if queued.Outcome == nil || queued.Outcome.Status != messages.OutcomeCancelled {
+	if queued.Outcome == nil || queued.Outcome.Status != outcome.StatusClientClosedRequest {
 		t.Errorf("settled outcome = %+v, want cancelled", queued.Outcome)
 	}
 }
@@ -531,19 +533,19 @@ func TestSettle_CommandsWithoutAgentWork_SettleImmediately(t *testing.T) {
 	cases := []struct {
 		text   string
 		msgID  string
-		status messages.OutcomeStatus
+		status int
 	}{
-		{"/think", "om_settle_think", messages.OutcomeUnknown},
-		{"/tools", "om_settle_tools", messages.OutcomeUnknown},
-		{"/watch", "om_settle_watch", messages.OutcomeUnknown},
-		{"/cwd " + h.cs.SelectedCwd(), "om_settle_cwd", messages.OutcomeOK},
+		{"/think", "om_settle_think", 0},
+		{"/tools", "om_settle_tools", 0},
+		{"/watch", "om_settle_watch", 0},
+		{"/cwd " + h.cs.SelectedCwd(), "om_settle_cwd", http.StatusOK},
 	}
 
 	for _, tc := range cases {
 		h.drive(t, tc.text, tc.msgID)
 		got := h.assertOneSettled(t, tc.msgID, 3*time.Second)
 		if got.Outcome == nil || got.Outcome.Status != tc.status {
-			t.Errorf("%s: settled outcome = %+v, want %s", tc.text, got.Outcome, tc.status)
+			t.Errorf("%s: settled outcome = %+v, want %d", tc.text, got.Outcome, tc.status)
 		}
 	}
 }
@@ -584,7 +586,7 @@ func TestSettle_Steer_SettlesWhenTheSteeredTurnEnds(t *testing.T) {
 	h.openTurnGate()
 
 	got := h.waitSettledFor(t, "om_settle_steer", 3*time.Second)
-	if got.Outcome == nil || got.Outcome.Status != messages.OutcomeOK {
+	if got.Outcome == nil || got.Outcome.Status != http.StatusOK {
 		t.Errorf("settled outcome = %+v, want ok", got.Outcome)
 	}
 }

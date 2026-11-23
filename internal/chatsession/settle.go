@@ -2,11 +2,14 @@ package chatsession
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"strconv"
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // Work tracks the structured outcome of one inbound message.
@@ -17,7 +20,8 @@ import (
 // goes out once, when the last hold is released — so the outcome a
 // consumer sees is the merge of everything that reported.
 //
-// A message nobody reported on settles with OutcomeUnknown.
+// A message nobody reported on settles with the zero outcome: no
+// status and no facts, and the words that say so.
 type Work struct {
 	cs    *ChatSession
 	msgID string
@@ -25,7 +29,7 @@ type Work struct {
 	mu       sync.Mutex
 	holds    int
 	released bool
-	outcome  messages.Outcome
+	verdict  outcome.Outcome
 	unsubs   []*unsubOnce
 	// anchor is the userMsgID the prompt-end event carries for
 	// this message. It equals msgID until the message is merged
@@ -63,7 +67,7 @@ func (cs *ChatSession) Hold(msgID string) *Work {
 
 // Report merges an outcome into the work. Reporting after the work
 // was released is a no-op — the settled message already went out.
-func (w *Work) Report(o messages.Outcome) {
+func (w *Work) Report(o outcome.Outcome) {
 	if w == nil {
 		return
 	}
@@ -72,7 +76,7 @@ func (w *Work) Report(o messages.Outcome) {
 	if w.released {
 		return
 	}
-	w.outcome = messages.Merge(w.outcome, o)
+	w.verdict = outcome.Merge(w.verdict, o)
 }
 
 // ReportPromptEnd merges the verdict of an ended agent turn.
@@ -83,10 +87,15 @@ func (w *Work) Report(o messages.Outcome) {
 // to a plain "ok". It applies only when the work carries no verdict
 // yet.
 //
+// A turn that reported a failure always applies, even when it ended
+// cleanly: the bridge ends a failed turn with the same event it ends
+// a successful one with, and the failure it carried is new
+// information whatever the command said.
+//
 // A non-clean end always applies: it outranks every successful
 // verdict, and the turn failing is new information regardless of
 // what the command said.
-func (w *Work) ReportPromptEnd(reason agent.PromptEndReason) {
+func (w *Work) ReportPromptEnd(reason agent.PromptEndReason, err error) {
 	if w == nil {
 		return
 	}
@@ -95,11 +104,10 @@ func (w *Work) ReportPromptEnd(reason agent.PromptEndReason) {
 	if w.released {
 		return
 	}
-	if reason == agent.PromptEndClean &&
-		w.outcome.Status != "" && w.outcome.Status != messages.OutcomeUnknown {
+	if reason == agent.PromptEndClean && err == nil && w.verdict.Reported() {
 		return
 	}
-	w.outcome = messages.Merge(w.outcome, outcomeForPromptEnd(reason))
+	w.verdict = outcome.Merge(w.verdict, outcomeForPromptEnd(reason, err))
 }
 
 // anchorID returns the userMsgID whose prompt-end event ends this
@@ -153,7 +161,7 @@ func (w *Work) Release() {
 		return
 	}
 	w.released = true
-	outcome := w.outcome
+	verdict := w.verdict
 	unsubs := w.unsubs
 	w.unsubs = nil
 	w.mu.Unlock()
@@ -161,7 +169,7 @@ func (w *Work) Release() {
 	for _, u := range unsubs {
 		u.call()
 	}
-	w.cs.settle(w.msgID, outcome)
+	w.cs.settle(w.msgID, verdict)
 }
 
 // ReleaseAll drops every hold at once and settles the message.
@@ -186,7 +194,7 @@ func (w *Work) ReleaseAll() {
 	}
 	w.holds = 0
 	w.released = true
-	outcome := w.outcome
+	verdict := w.verdict
 	unsubs := w.unsubs
 	w.unsubs = nil
 	w.mu.Unlock()
@@ -194,20 +202,17 @@ func (w *Work) ReleaseAll() {
 	for _, u := range unsubs {
 		u.call()
 	}
-	w.cs.settle(w.msgID, outcome)
+	w.cs.settle(w.msgID, verdict)
 }
 
 // settle emits the settled message for msgID and drops the work.
-func (cs *ChatSession) settle(msgID string, outcome messages.Outcome) {
+func (cs *ChatSession) settle(msgID string, verdict outcome.Outcome) {
 	cs.workMu.Lock()
 	delete(cs.works, msgID)
 	cs.workMu.Unlock()
 
-	if outcome.Status == "" {
-		outcome.Status = messages.OutcomeUnknown
-	}
-	if outcome.Summary == "" {
-		outcome.Summary = string(outcome.Status)
+	if verdict.StatusText == "" && !verdict.Reported() {
+		verdict.StatusText = "nobody reported a verdict"
 	}
 	// Every IM channel drops the settled message — it exists for
 	// programs that drive nightme, not for humans. The log line is
@@ -217,8 +222,8 @@ func (cs *ChatSession) settle(msgID string, outcome messages.Outcome) {
 	slog.Info("chatsession: message settled",
 		"chat_id", cs.ChatID,
 		"message_id", msgID,
-		"status", string(outcome.Status),
-		"summary", outcome.Summary,
+		"status", verdict.Status,
+		"summary", verdict.StatusText,
 	)
 
 	em := cs.Emitter()
@@ -229,7 +234,7 @@ func (cs *ChatSession) settle(msgID string, outcome messages.Outcome) {
 		ChatID:  cs.ChatID,
 		Kind:    messages.OutMessageSettled,
 		ReplyTo: msgID,
-		Outcome: &outcome,
+		Outcome: &verdict,
 	})
 }
 
@@ -269,7 +274,7 @@ func (cs *ChatSession) HoldUntilPromptEnd(msgID string) *Work {
 			return false
 		}
 		u.call()
-		w.ReportPromptEnd(e.Reason)
+		w.ReportPromptEnd(e.Reason, e.Err)
 		w.Release()
 		return false
 	}))
@@ -299,25 +304,46 @@ func (cs *ChatSession) reanchorWork(msgID, anchorID string) {
 
 // outcomeForPromptEnd maps a prompt-end reason onto an outcome.
 //
-// The summary is empty on purpose: it lets the merge keep the
-// summary a command reported (the prompt end is the generic
-// fallback, the command's is the specific one).
+// The status is the reason's own: a clean turn is a success, a turn
+// the operator stopped is a cancellation, a turn that died is a
+// failure. An upstream failure that carries an HTTP status says
+// better than the reason does, so it wins — a 429 from the API is a
+// rate limit, not a generic failure.
 //
-// A turn that broke carries the error description: its presence is
-// what tells a consumer that the outcome is an exception rather than
-// a normal result. A turn that was stopped carries none — the
-// operator stopped it, so nothing broke.
-func outcomeForPromptEnd(reason agent.PromptEndReason) messages.Outcome {
-	out := messages.Outcome{Status: messages.OutcomeFailed}
-	switch reason {
-	case agent.PromptEndClean:
-		out.Status = messages.OutcomeOK
-	case agent.PromptEndUserStopped, agent.PromptEndUserKilled:
-		out.Status = messages.OutcomeCancelled
+// The words are the turn's own: the merge keeps the words a command
+// reported when the turn did not break (the prompt end is the generic
+// fallback, the command's is the specific one), and the turn's words
+// when it did.
+func outcomeForPromptEnd(reason agent.PromptEndReason, err error) outcome.Outcome {
+	out := outcome.Outcome{
+		Success: false,
+		Status:  reason.Status(),
 	}
-	out.Data = map[string]string{"end_reason": reason.String()}
-	if out.Status == messages.OutcomeFailed {
-		out.Data[messages.OutcomeKeyError] = "the agent turn ended as " + reason.String()
+	var apiErr *agent.APIError
+	if err != nil && errors.As(err, &apiErr) {
+		if apiErr.Status > 0 {
+			out.Status = apiErr.Status
+		}
+		out.Data = map[string]string{}
+		if apiErr.Status > 0 {
+			out.Data[KeyUpstreamStatus] = strconv.Itoa(apiErr.Status)
+		}
+		if apiErr.Code != "" {
+			out.Data[KeyUpstreamCode] = apiErr.Code
+		}
+		if apiErr.Message != "" {
+			out.StatusText = apiErr.Message
+		}
+		return out
+	}
+	if reason == agent.PromptEndClean {
+		out.Success = true
+		out.StatusText = "the agent turn ended cleanly"
+		return out
+	}
+	out.StatusText = "the agent turn ended as " + reason.String()
+	if err != nil {
+		out.StatusText = err.Error()
 	}
 	return out
 }
@@ -373,7 +399,7 @@ func WithWork(ctx context.Context, w *Work) context.Context {
 // ReportOutcome merges an outcome into the Work carried by ctx.
 // It is a no-op when ctx carries no Work — a command invoked
 // outside the inbound dispatch path has nothing to report to.
-func ReportOutcome(ctx context.Context, o messages.Outcome) {
+func ReportOutcome(ctx context.Context, o outcome.Outcome) {
 	if ctx == nil {
 		return
 	}

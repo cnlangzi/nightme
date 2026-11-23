@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // Tests for the `/gtw back <branch>` direction: jump from the
@@ -53,7 +55,7 @@ func moveToRepoRoot(t *testing.T, rig *closeTestRig, repoRoot string) {
 //
 // The card is captured before the work is released: releasing it
 // settles the message and emits the settled message as well.
-func runBack(t *testing.T, rig *closeTestRig, arg string) (string, *messages.Outcome) {
+func runBack(t *testing.T, rig *closeTestRig, arg string) (string, *outcome.Outcome) {
 	t.Helper()
 	work := rig.cs.Hold("msg-btw")
 	ctx := chatsession.WithWork(context.Background(), work)
@@ -67,7 +69,7 @@ func runBack(t *testing.T, rig *closeTestRig, arg string) (string, *messages.Out
 
 // settledOutcome returns the outcome of the settled message the
 // recorder captured, or nil when nothing settled.
-func settledOutcome(rec *closeTestRecCh) *messages.Outcome {
+func settledOutcome(rec *closeTestRecCh) *outcome.Outcome {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	for _, m := range rec.sends {
@@ -125,8 +127,8 @@ func TestRunBackToWorktree_HappyPath(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusOK)
 	}
 	if outcome.Data["worktree"] != wt {
 		t.Errorf("outcome data[worktree] = %q, want %q", outcome.Data["worktree"], wt)
@@ -208,8 +210,8 @@ func TestRunBackToWorktree_RepairsMissingYml(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusOK)
 	}
 
 	// yml now exists and was written as ModeLocal.
@@ -298,8 +300,8 @@ func TestRunBackToWorktree_PrefixMatchesBranch(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusOK)
 	}
 	if got := rig.cs.SelectedCwd(); got != wt {
 		t.Errorf("SelectedCwd = %q, want %q", got, wt)
@@ -340,8 +342,8 @@ func TestRunBackToWorktree_ExactMatchWins(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusOK)
 	}
 	if got := rig.cs.SelectedCwd(); got != wtExact {
 		t.Errorf("SelectedCwd = %q, want %q (the exact match)", got, wtExact)
@@ -378,13 +380,10 @@ func TestRunBackToWorktree_AmbiguousPrefixFails(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeFailed {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeFailed)
+	if outcome.Status != http.StatusBadRequest {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusBadRequest)
 	}
-	if outcome.Data["reason"] != "ambiguous" {
-		t.Errorf("outcome data[reason] = %q, want %q", outcome.Data["reason"], "ambiguous")
-	}
-	if got := outcome.Data["candidates"]; !strings.Contains(got, "42-feat-login") ||
+	if got := outcome.Data["worktree_candidates"]; !strings.Contains(got, "42-feat-login") ||
 		!strings.Contains(got, "42-fix-logout") {
 		t.Errorf("outcome data[candidates] = %q, want both branch names", got)
 	}
@@ -422,13 +421,10 @@ func TestRunBackToWorktree_NoMatchListsWorktreeBranches(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeFailed {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeFailed)
+	if outcome.Status != http.StatusNotFound {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusNotFound)
 	}
-	if outcome.Data["reason"] != "not_found" {
-		t.Errorf("outcome data[reason] = %q, want %q", outcome.Data["reason"], "not_found")
-	}
-	if got := outcome.Data["candidates"]; !strings.Contains(got, "42-feat-login") {
+	if got := outcome.Data["worktree_candidates"]; !strings.Contains(got, "42-feat-login") {
 		t.Errorf("outcome data[candidates] = %q, want the worktree branch", got)
 	}
 	if got := rig.cs.SelectedCwd(); got != repoRoot {
@@ -458,11 +454,8 @@ func TestRunBackToWorktree_NoWorktreesAtAll(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeFailed {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeFailed)
-	}
-	if outcome.Data["reason"] != "not_found" {
-		t.Errorf("outcome data[reason] = %q, want %q", outcome.Data["reason"], "not_found")
+	if outcome.Status != http.StatusNotFound {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusNotFound)
 	}
 	if got := rig.cs.SelectedCwd(); got != repoRoot {
 		t.Errorf("SelectedCwd must not move on failure; got %q, want %q", got, repoRoot)
@@ -497,11 +490,8 @@ func TestRunBackToWorktree_PrimaryCheckoutIsNotACandidate(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeFailed {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeFailed)
-	}
-	if outcome.Data["reason"] != "not_found" {
-		t.Errorf("outcome data[reason] = %q, want %q", outcome.Data["reason"], "not_found")
+	if outcome.Status != http.StatusNotFound {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusNotFound)
 	}
 	if got := rig.cs.SelectedCwd(); got != repoRoot {
 		t.Errorf("SelectedCwd must not move on failure; got %q, want %q", got, repoRoot)
@@ -532,11 +522,8 @@ func TestRunBackToWorktree_DetachedWorktreeIsNotACandidate(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeFailed {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeFailed)
-	}
-	if outcome.Data["reason"] != "not_found" {
-		t.Errorf("outcome data[reason] = %q, want %q", outcome.Data["reason"], "not_found")
+	if outcome.Status != http.StatusNotFound {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusNotFound)
 	}
 	if got := rig.cs.SelectedCwd(); got != repoRoot {
 		t.Errorf("SelectedCwd must not move on failure; got %q, want %q", got, repoRoot)
@@ -568,11 +555,8 @@ func TestRunBackToWorktree_MatchingIsCaseSensitive(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeFailed {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeFailed)
-	}
-	if outcome.Data["reason"] != "not_found" {
-		t.Errorf("outcome data[reason] = %q, want %q", outcome.Data["reason"], "not_found")
+	if outcome.Status != http.StatusNotFound {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusNotFound)
 	}
 	if got := rig.cs.SelectedCwd(); got != repoRoot {
 		t.Errorf("SelectedCwd must not move on failure; got %q, want %q", got, repoRoot)
@@ -598,11 +582,8 @@ func TestRunBackToWorktree_StaleWorktreeDirectory(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeFailed {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeFailed)
-	}
-	if outcome.Data["reason"] != "not_found" {
-		t.Errorf("outcome data[reason] = %q, want %q", outcome.Data["reason"], "not_found")
+	if outcome.Status != http.StatusNotFound {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusNotFound)
 	}
 	if got := rig.cs.SelectedCwd(); got != repoRoot {
 		t.Errorf("SelectedCwd must not move on failure; got %q, want %q", got, repoRoot)
@@ -637,11 +618,8 @@ func TestRunBackToWorktree_NonWorktreeDirectoryIsNeverEntered(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeFailed {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeFailed)
-	}
-	if outcome.Data["reason"] != "not_found" {
-		t.Errorf("outcome data[reason] = %q, want %q", outcome.Data["reason"], "not_found")
+	if outcome.Status != http.StatusNotFound {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusNotFound)
 	}
 	if got := rig.cs.SelectedCwd(); got != repoRoot {
 		t.Errorf("SelectedCwd must not move on rejection; got %q, want %q", got, repoRoot)
@@ -690,8 +668,8 @@ func TestRunBackToWorktree_JumpsFromALinkedWorktreeRoot(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusOK)
 	}
 	if got := rig.cs.SelectedCwd(); got != wtTarget {
 		t.Errorf("SelectedCwd = %q, want %q", got, wtTarget)
@@ -730,8 +708,8 @@ func TestRunBackToWorktree_ForeignWorktreeGetsNoOwnershipToken(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusOK)
 	}
 	// The chat still enters the worktree the user asked for.
 	if got := rig.cs.SelectedCwd(); got != foreign {
@@ -776,8 +754,8 @@ func TestRunBackToWorktree_JumpsFromAWorktreeRoot(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusOK)
 	}
 	if got := outcome.Data["worktree"]; got != wtB {
 		t.Errorf("outcome data[worktree] = %q, want %q", got, wtB)
@@ -861,11 +839,8 @@ func TestRunBackToWorktree_SelfJumpKeepsCwd(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
-	}
-	if got := outcome.Data["reason"]; got != "already_in_worktree" {
-		t.Errorf("outcome data[reason] = %q, want %q", got, "already_in_worktree")
+	if outcome.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusOK)
 	}
 	if got := outcome.Data["worktree"]; got != wtA {
 		t.Errorf("outcome data[worktree] = %q, want %q", got, wtA)
@@ -926,11 +901,8 @@ func TestRunBackToWorktree_SelfJumpRepairsMissingYml(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
-	}
-	if got := outcome.Data["reason"]; got != "already_in_worktree" {
-		t.Errorf("outcome data[reason] = %q, want %q", got, "already_in_worktree")
+	if outcome.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusOK)
 	}
 	if got := rig.cs.SelectedCwd(); got != wtA {
 		t.Errorf("SelectedCwd must not move on a self-jump; got %q, want %q", got, wtA)
@@ -987,8 +959,8 @@ func TestRunBackToWorktree_RepairsMissingYmlInTargetFromWorktree(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusOK)
 	}
 	if got := rig.cs.SelectedCwd(); got != wtB {
 		t.Errorf("SelectedCwd = %q, want %q", got, wtB)
@@ -1048,8 +1020,8 @@ func TestRunBackToWorktree_JumpsFromForeignWorktree(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusOK)
 	}
 	if got := rig.cs.SelectedCwd(); got != wtB {
 		t.Errorf("SelectedCwd = %q, want %q", got, wtB)
@@ -1101,11 +1073,8 @@ func TestRunBackToWorktree_RejectsSubdirectoryCwd(t *testing.T) {
 			if outcome == nil {
 				t.Fatalf("no settled outcome: the command reported nothing")
 			}
-			if outcome.Status != messages.OutcomeFailed {
-				t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeFailed)
-			}
-			if got := outcome.Data["reason"]; got != "wrong_cwd" {
-				t.Errorf("outcome data[reason] = %q, want %q", got, "wrong_cwd")
+			if outcome.Status != http.StatusBadRequest {
+				t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusBadRequest)
 			}
 			if got := rig.cs.SelectedCwd(); got != tc.cwd {
 				t.Errorf("SelectedCwd must not move on rejection; got %q, want %q", got, tc.cwd)
@@ -1146,11 +1115,8 @@ func TestRunBackToWorktree_NoMatchFromWorktreeHintsMainRepo(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeFailed {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeFailed)
-	}
-	if got := outcome.Data["reason"]; got != "not_found" {
-		t.Errorf("outcome data[reason] = %q, want %q", got, "not_found")
+	if outcome.Status != http.StatusNotFound {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusNotFound)
 	}
 	if got := rig.cs.SelectedCwd(); got != wtA {
 		t.Errorf("SelectedCwd must not move on failure; got %q, want %q", got, wtA)

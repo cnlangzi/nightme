@@ -58,6 +58,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -67,6 +68,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/timeouts"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // errParseAgentReply is the sentinel returned by parsePRReply
@@ -96,7 +98,7 @@ var errPRTitleFormat = errors.New("the agent's PR title is not in `<type>(<optio
 // rewrites into its canonical form.
 var errPRMissingSummaryHeading = errors.New("the agent's PR body does not start with `" + summaryHeading + "`")
 
-// The codes the format gate reports in the outcome's Data["format"]:
+// The codes the format gate reports in the outcome's Data[KeyFormat]:
 // which check rejected the agent's reply.
 const (
 	prFormatParseFailed    = "parse_failed"
@@ -197,12 +199,12 @@ func dispatchPR(
 		if !ok {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				"❌ no failed /gtw pr to continue — run /gtw pr first",
-				command.FailedOutcome("no_continue", "this chat has no failed /gtw pr to continue")), nil
+				command.FailedOutcome(http.StatusNotFound, "this chat has no failed /gtw pr to continue")), nil
 		}
 		if !rec.failed {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				"ℹ️ the last /gtw pr completed — nothing to continue",
-				command.NoopOutcome("the last /gtw pr completed — nothing to continue", nil)), nil
+				command.SuccessOutcome("the last /gtw pr completed — nothing to continue", nil)), nil
 		}
 		cont = &rec
 		c = rec.ctx
@@ -220,7 +222,7 @@ func dispatchPR(
 		// already explains the "no origin remote" case.
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %v", err),
-			command.FailedOutcome("error", "the default branch could not be determined")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the default branch could not be determined")), nil
 	}
 
 	// --- gate 1: origin/<branch> ref exists -------------------------
@@ -234,14 +236,14 @@ func dispatchPR(
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %v", err),
-			command.FailedOutcome("error", "the remote branch could not be checked")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the remote branch could not be checked")), nil
 	}
 	if !headExists {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf(
 				"❌ origin/%s does not exist — /gtw push first to publish the branch to origin",
 				c.Branch),
-			command.FailedOutcome("no_remote_branch",
+			command.FailedOutcome(http.StatusNotFound,
 				"the branch is not published to origin")), nil
 	}
 
@@ -253,7 +255,7 @@ func dispatchPR(
 		// platform). Echo verbatim.
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %v", err),
-			command.FailedOutcome("error", "the git host could not be resolved")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the git host could not be resolved")), nil
 	}
 
 	// The label catalog is verified before the pull request is
@@ -293,16 +295,16 @@ func dispatchPR(
 		if errors.Is(err, ErrCLINotInstalled) {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				withWarning(fmt.Sprintf("❌ %v", err)),
-				command.FailedOutcome("error", "the git host CLI is not installed")), nil
+				command.FailedOutcome(http.StatusInternalServerError, "the git host CLI is not installed")), nil
 		}
 		if errors.Is(err, ErrCLICannotStart) {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				withWarning(fmt.Sprintf("❌ %v", err)),
-				command.FailedOutcome("error", "the git host CLI could not start")), nil
+				command.FailedOutcome(http.StatusInternalServerError, "the git host CLI could not start")), nil
 		}
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			withWarning(fmt.Sprintf("❌ check existing PR: %v", err)),
-			command.FailedOutcome("error", "the existing pull requests could not be listed")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the existing pull requests could not be listed")), nil
 	}
 	if existing != nil {
 		// The branch already has a pull request: a normal branch —
@@ -318,11 +320,11 @@ func dispatchPR(
 			withWarning(fmt.Sprintf(
 				"✅ branch %s already has an open PR (#%d): %s",
 				c.Branch, existing.Number, existing.URL), readyWarnings...),
-			command.BranchOutcome("pr_exists", "the branch already has an open pull request",
+			command.SuccessOutcome("the branch already has an open pull request",
 				map[string]string{
-					"branch":    c.Branch,
-					"pr_number": fmt.Sprintf("%d", existing.Number),
-					"pr_url":    existing.URL,
+					KeyBranch:   c.Branch,
+					KeyPRNumber: fmt.Sprintf("%d", existing.Number),
+					KeyPRURL:    existing.URL,
 				})), nil
 	}
 
@@ -377,14 +379,14 @@ func dispatchPR(
 			sessionID: run.Res.SessionID,
 			failed:    true,
 		})
-		reason := "agent_error"
+		status := http.StatusInternalServerError
 		if errors.Is(err, agent.ErrUnknownAgent) {
-			reason = "unknown_agent"
+			status = http.StatusNotFound
 		}
 		return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,
 			withWarning(err.Error()), run.AgentName, run.Res,
-			command.FailedOutcomeData(reason, "the agent did not produce a pull request",
-				map[string]string{"agent": run.AgentName})), nil
+			command.FailedOutcomeData(status, "the agent did not produce a pull request",
+				map[string]string{KeyAgent: run.AgentName})), nil
 	}
 	if run.Failure != nil {
 		// The reply did not carry the format the PR needs, twice.
@@ -402,11 +404,11 @@ func dispatchPR(
 				"❌ %v (after %d attempts) — agent output was:\n%s\n↳ %s",
 				run.Failure.Reason, run.Attempts, indentLines(run.Rejected, "  "),
 				prRetryHint(cont != nil))),
-			command.FailedOutcomeData("agent_error", "the agent reply did not match the pull request format",
+			command.FailedOutcomeData(http.StatusInternalServerError, "the agent reply did not match the pull request format",
 				map[string]string{
-					"agent":    run.AgentName,
-					"format":   run.Failure.Code,
-					"attempts": strconv.Itoa(run.Attempts),
+					KeyAgent:    run.AgentName,
+					KeyFormat:   run.Failure.Code,
+					KeyAttempts: strconv.Itoa(run.Attempts),
 				})), nil
 	}
 
@@ -475,14 +477,14 @@ func dispatchPR(
 				withWarning(fmt.Sprintf(
 					"❌ origin/%s no longer exists — /gtw push first to republish",
 					c.Branch)),
-				command.FailedOutcome("no_remote_branch",
+				command.FailedOutcome(http.StatusNotFound,
 					"the branch is no longer published to origin")), nil
 		case errors.Is(err, ErrNoCommitsBetween):
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				withWarning(fmt.Sprintf(
 					"❌ no commits between %s and %s — push new commits first, or rebase onto a newer base.",
 					baseBranch, c.Branch)),
-				command.FailedOutcome("no_commits", "the branch has no commits to review")), nil
+				command.FailedOutcome(http.StatusConflict, "the branch has no commits to review")), nil
 		case errors.Is(err, ErrPRExists):
 			// The race window of gate 2: no pull request when the
 			// gate ran, one when the pull request was opened. The
@@ -497,20 +499,20 @@ func dispatchPR(
 				withWarning(fmt.Sprintf(
 					"✅ a PR for %s already exists — check your repo's PR list.",
 					c.Branch), readyWarnings...),
-				command.BranchOutcome("pr_exists", "the branch already has an open pull request",
-					map[string]string{"branch": c.Branch})), nil
+				command.SuccessOutcome("the branch already has an open pull request",
+					map[string]string{KeyBranch: c.Branch})), nil
 		case errors.Is(err, ErrCLINotInstalled):
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				withWarning(fmt.Sprintf("❌ %v", err)),
-				command.FailedOutcome("error", "the git host CLI is not installed")), nil
+				command.FailedOutcome(http.StatusInternalServerError, "the git host CLI is not installed")), nil
 		case errors.Is(err, ErrCLICannotStart):
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				withWarning(fmt.Sprintf("❌ %v", err)),
-				command.FailedOutcome("error", "the git host CLI could not start")), nil
+				command.FailedOutcome(http.StatusInternalServerError, "the git host CLI could not start")), nil
 		default:
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				withWarning(fmt.Sprintf("❌ create PR failed: %v", err)),
-				command.FailedOutcome("error", "the pull request could not be created")), nil
+				command.FailedOutcome(http.StatusInternalServerError, "the pull request could not be created")), nil
 		}
 	}
 
@@ -558,12 +560,12 @@ func dispatchPR(
 	// CreatePR, ErrPRExists) stay on the no-stamp reply — they're
 	// not the agent-result surface.
 	prData := map[string]string{
-		"branch": c.Branch,
-		"pr_url": url,
-		"agent":  run.AgentName,
+		KeyBranch: c.Branch,
+		KeyPRURL:  url,
+		KeyAgent:  run.AgentName,
 	}
 	if number > 0 {
-		prData["pr_number"] = fmt.Sprintf("%d", number)
+		prData[KeyPRNumber] = fmt.Sprintf("%d", number)
 	}
 	// The pull request is open: there is nothing left to continue.
 	// The record says so, so a later `--continue` can tell the user
@@ -574,10 +576,11 @@ func dispatchPR(
 	})
 	return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,
 		card, run.AgentName, run.Res,
-		messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "opened the pull request",
-			Data:    prData,
+		outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "opened the pull request",
+			Data:       prData,
 		}), nil
 }
 
@@ -1465,7 +1468,7 @@ func normalizeSummaryHeading(body string) string {
 // reply: which check rejected it, and the reason the user reads.
 type prFormatFailure struct {
 	// Code names the failed check; it rides on the outcome's
-	// Data["format"].
+	// Data[KeyFormat].
 	Code string
 	// Reason is the sentence the user reads, and the sentence the
 	// correction prompt names.

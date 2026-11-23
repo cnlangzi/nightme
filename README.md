@@ -581,31 +581,31 @@ jobs:
         description: 这一轮先等 5 分钟再挑下一个。队列空时这一轮没有活干，这一步就是两轮之间的退避。
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
-        description: 从 nightme/assigned 队列挑一个 open issue，交给 agent 在 worktree 里修。队列空时它报 no_candidate —— 这不是错误，是正常工作流的一个分支：引擎会跳过本轮后面的步、跑 wait 退避 5 分钟，再挑下一个。只有 data.issue 有值，后面的步骤才跑。
+        description: 从 nightme/assigned 队列挑一个 open issue，交给 agent 在 worktree 里修。队列空时它报 200 但没有 data.issue —— 这不是错误，是正常工作流的一个分支：引擎会跳过本轮后面的步、跑 wait 退避 5 分钟，再挑下一个。只有 data.issue 有值，后面的步骤才跑。
       - id: commit
         message: "/gtw commit"
         if: ${{ steps.fix.outputs.data.issue }}
-        description: 把 agent 的改动提交成 commit。命令会告诉你修改有没有进到 git 里：提交上了是正常；没提交上但活已经干完了（agent 自己提交的）也是正常；outcome 带 error 才是异常（nothing_to_commit），那时再决定要不要让 agent 去改。
+        description: 把 agent 的改动提交成 commit。命令会告诉你修改有没有进到 git 里：data.commits 有数字就是提交上了；commits=0 说明工作区没有可提交的（agent 自己提交过了也是这个结果）—— 那时再决定要不要让 agent 去改。
       - id: review
         message: "/review"
         if: ${{ steps.fix.outputs.data.issue }}
-        description: review 当前分支与默认分支的差异，findings 回到聊天里。中断（还有组没跑完）用 /review -c 续跑，换 agent 接手就加 -a；already_running 就等它结束。no_diff 是异常：fix 本该改出了东西，分支却和 base 一样 —— instruct 让 agent 真正改出来，再跑 commit 和 review；base_unknown 是 base 分支没解析出来，也什么都没 review，先弄清 base 再跑 review。
+        description: review 当前分支与默认分支的差异，findings 回到聊天里。中断（还有组没跑完）用 /review -c 续跑，换 agent 接手就加 -a；409 就等它结束。404 是异常：fix 本该改出了东西，分支却和 base 一样 —— instruct 让 agent 真正改出来，再跑 commit 和 review；500 是 base 分支没解析出来，也什么都没 review，先弄清 base 再跑 review。
       - id: commit2
         message: "/gtw commit"
         if: ${{ steps.fix.outputs.data.issue }}
-        description: 把 review 之后的修改提交成 commit。findings 先评估：只有成立且必要的才修，其余驳回 —— 要修的用 instruct 把这几条 findings 交给 agent 改，改完跑 commit2 提交。outcome 不带 error 就是正常：findings 已修好并提交，或没有必须修的 findings —— 结果够用，跑 push 继续；带 error 才是异常（nothing_to_commit：工作区没有改动，findings 还没修好），先让 agent 去改。
+        description: 把 review 之后的修改提交成 commit。findings 先评估：只有成立且必要的才修，其余驳回 —— 要修的用 instruct 把这几条 findings 交给 agent 改，改完跑 commit2 提交。status 是 200 就是正常：findings 已修好并提交，或没有必须修的 findings —— 结果够用，跑 push 继续；commits=0 才是异常（工作区没有改动，findings 还没修好），先让 agent 去改。
       - id: push
         message: "/gtw push"
         if: ${{ steps.fix.outputs.data.issue }}
-        description: 把分支推到远端。命令会告诉你有没有东西没推：本地已经全部在远端是正常的（可能 agent 自己推过），本地还有没推的才是异常，那时回 commit 那一步。
+        description: 把分支推到远端。命令会告诉你有没有东西没推：data.commits 是 0 说明本地已经全部在远端（可能 agent 自己推过），那是正常的；commits 有数字说明本地还有没推的，那时回 commit 那一步。
       - id: pr
         message: "/gtw pr"
         if: ${{ steps.fix.outputs.data.issue }}
-        description: 给分支开 PR。pr_exists 说明这个分支的 PR 已经开过，这也是正常的，结果够用，跑 back 继续；no_remote_branch 或 no_commits 时分别先跑 push 或先跑 commit。
+        description: 给分支开 PR。data.pr_number 有值说明这个分支的 PR 已经开过，这也是正常的，结果够用，跑 back 继续；404 说明分支还没发布到远端（先跑 push），409 说明分支和 base 之间没有 commit（先跑 commit）。
       - id: back
         message: "/gtw back"
         if: ${{ steps.fix.outputs.data.issue }}
-        description: 修复做完后回到主仓库目录 —— 下一轮的 fix 必须从 main 开始，worktree 里不允许开下一个 fix（/gtw fix 会报 already_active）。
+        description: 修复做完后回到主仓库目录 —— 下一轮的 fix 必须从 main 开始，worktree 里不允许开下一个 fix（/gtw fix 会报 409）。
 ```
 
 Deploy it by writing the file to
@@ -920,21 +920,26 @@ correct.
 
 ### The outcome model
 
-Every command reports a structured outcome: a status, a one-line summary and the
+Every command reports a structured outcome: a status, one line of words and the
 facts it knows.
 
 | Status | What it means |
 |---|---|
-| `ok` | The work completed as asked. |
-| `noop` | There was nothing to do — the request was valid and the world already satisfied it. |
-| `incomplete` | The work started and part of it finished; the remainder did not. |
-| `failed` | The work did not complete. A command that ran *because* something existed and found nothing to do reports `failed`: nothing to commit, nothing to push, no diff to review, an empty queue. The premise did not hold, so the caller decides what to do next. |
-| `cancelled` | Somebody stopped it. |
-| `timeout` | It ran out of time. |
-| `unknown` | Nobody reported a verdict. |
+| `2xx` | The work completed as asked — or there was nothing to do, which counts as done too. |
+| `4xx` | The request or the world refused it: a wrong command line, an issue that is not there, a branch in the way. |
+| `5xx` | Something broke: the agent did not run, the worktree could not be read, the platform could not be reached. |
+| `499` | Somebody stopped it. |
+| `0` | Nobody reported a verdict. |
 
-The outcome of a step reaches the expressions of the steps after it: the status
-as `${{ steps.<id>.outputs.status }}`, the facts under
+The status is an HTTP status, and its category says which branch the work took:
+a `2xx` is a normal result, a `4xx` or a `5xx` is an exception. A command that ran
+*because* something existed and found nothing to do is a `2xx` — the facts say
+which case it was: no `issue` key, or `commits=0`.
+
+The outcome of a step reaches the expressions of the steps after it: the verdict
+as `${{ steps.<id>.outputs.success }}`, the status as
+`${{ steps.<id>.outputs.status }}`, the words as
+`${{ steps.<id>.outputs.statusText }}`, the facts under
 `${{ steps.<id>.outputs.data.<key> }}`.
 
 ### When it does not run

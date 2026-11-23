@@ -13,6 +13,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // captureEmitter records the outbound messages of a chat.
@@ -43,7 +44,7 @@ func (e *captureEmitter) tasks() []messages.OutboundMessage {
 }
 
 // settled returns the outcome of the settled message.
-func (e *captureEmitter) settled() *messages.Outcome {
+func (e *captureEmitter) settled() *outcome.Outcome {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, msg := range e.msgs {
@@ -55,10 +56,10 @@ func (e *captureEmitter) settled() *messages.Outcome {
 }
 
 // lastSettled returns the outcome of the last settled message.
-func (e *captureEmitter) lastSettled() *messages.Outcome {
+func (e *captureEmitter) lastSettled() *outcome.Outcome {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	var out *messages.Outcome
+	var out *outcome.Outcome
 	for _, msg := range e.msgs {
 		if msg.Kind == messages.OutMessageSettled {
 			out = msg.Outcome
@@ -133,11 +134,11 @@ func TestHandle_InstallsTheWorkflowAndCarriesTheReason(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the message settled without an outcome")
 	}
-	if outcome.Data["reason"] != ReasonInstalled {
-		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonInstalled)
+	if !strings.Contains(outcome.StatusText, "is installed") {
+		t.Errorf("the words are %q, want them to name the case", outcome.StatusText)
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("the status is %q, want %q", outcome.Status, messages.OutcomeOK)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("the status is %d, want %d", outcome.Status, http.StatusOK)
 	}
 	if outcome.Data["path"] != filepath.Join(dir, "nightme", "coder", "workflow.yml") {
 		t.Errorf("the path is %q, want the absolute path of the file", outcome.Data["path"])
@@ -197,9 +198,6 @@ func TestHandle_AnAddressThatDoesNotFitIsRefused(t *testing.T) {
 	outcome := em.settled()
 	if outcome == nil {
 		t.Fatal("the message settled without an outcome")
-	}
-	if outcome.Data["reason"] != ReasonInvalidAddress {
-		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonInvalidAddress)
 	}
 }
 
@@ -318,9 +316,6 @@ func TestHandle_TheReservedOwnersAreRefused(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the message settled without an outcome")
 	}
-	if outcome.Data["reason"] != ReasonInvalidAddress {
-		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonInvalidAddress)
-	}
 }
 
 // TestHandle_TheChecklistIsAnchoredToTheMessage — every snapshot
@@ -386,11 +381,11 @@ func TestHandle_AnUnchangedInstallIsANoop(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the message settled without an outcome")
 	}
-	if outcome.Status != messages.OutcomeNoop {
-		t.Errorf("the status is %q, want %q", outcome.Status, messages.OutcomeNoop)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("the status is %d, want %d", outcome.Status, http.StatusOK)
 	}
-	if outcome.Data["reason"] != ReasonUnchanged {
-		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonUnchanged)
+	if !strings.Contains(outcome.StatusText, "is already current") {
+		t.Errorf("the words are %q, want them to name the case", outcome.StatusText)
 	}
 }
 
@@ -429,11 +424,11 @@ func TestHandle_AnInstalledWorkflowIsSkippedUnlessForced(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the message settled without an outcome")
 	}
-	if outcome.Data["reason"] != ReasonSkipped {
-		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonSkipped)
+	if !strings.Contains(outcome.StatusText, "is already installed") {
+		t.Errorf("the words are %q, want them to name the case", outcome.StatusText)
 	}
-	if outcome.Status != messages.OutcomeNoop {
-		t.Errorf("the status is %q, want %q", outcome.Status, messages.OutcomeNoop)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("the status is %d, want %d", outcome.Status, http.StatusOK)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -458,8 +453,8 @@ func TestHandle_AnInstalledWorkflowIsSkippedUnlessForced(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the message settled without an outcome")
 	}
-	if outcome.Data["reason"] != ReasonUpdated {
-		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonUpdated)
+	if !strings.Contains(outcome.StatusText, "is updated") {
+		t.Errorf("the words are %q, want them to name the case", outcome.StatusText)
 	}
 	content, err = os.ReadFile(path)
 	if err != nil {
@@ -500,11 +495,11 @@ func TestHandle_UninstallRemovesTheWorkflow(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the message settled without an outcome")
 	}
-	if outcome.Data["reason"] != ReasonUninstalled {
-		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonUninstalled)
+	if !strings.Contains(outcome.StatusText, "is uninstalled") {
+		t.Errorf("the words are %q, want them to name the case", outcome.StatusText)
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("the status is %q, want %q", outcome.Status, messages.OutcomeOK)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("the status is %d, want %d", outcome.Status, http.StatusOK)
 	}
 	if outcome.Data["path"] != filepath.Join(dir, "nightme", "coder", "workflow.yml") {
 		t.Errorf("the path is %q, want the absolute path of the file", outcome.Data["path"])
@@ -549,11 +544,11 @@ func TestHandle_UninstallRemovesTheWorkflow(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the message settled without an outcome")
 	}
-	if outcome.Data["reason"] != ReasonNotInstalled {
-		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonNotInstalled)
+	if !strings.Contains(outcome.StatusText, "is not installed") {
+		t.Errorf("the words are %q, want them to name the case", outcome.StatusText)
 	}
-	if outcome.Status != messages.OutcomeNoop {
-		t.Errorf("the status is %q, want %q", outcome.Status, messages.OutcomeNoop)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("the status is %d, want %d", outcome.Status, http.StatusOK)
 	}
 }
 
@@ -590,9 +585,6 @@ func TestHandle_UninstallRefusesAnAddressThatDoesNotFit(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the message settled without an outcome")
 	}
-	if outcome.Data["reason"] != ReasonInvalidAddress {
-		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonInvalidAddress)
-	}
 }
 
 // TestHandle_ANameWithoutAnOwnerInstallsTheSameWorkflow — "coder"
@@ -625,8 +617,8 @@ func TestHandle_ANameWithoutAnOwnerInstallsTheSameWorkflow(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the message settled without an outcome")
 	}
-	if outcome.Data["reason"] != ReasonInstalled {
-		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonInstalled)
+	if !strings.Contains(outcome.StatusText, "is installed") {
+		t.Errorf("the words are %q, want them to name the case", outcome.StatusText)
 	}
 	if outcome.Data["path"] != path {
 		t.Errorf("the path is %q, want %q", outcome.Data["path"], path)
@@ -715,8 +707,8 @@ func TestHandle_ANameWithoutAnOwnerRemovesTheSameWorkflow(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the message settled without an outcome")
 	}
-	if outcome.Data["reason"] != ReasonUninstalled {
-		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonUninstalled)
+	if !strings.Contains(outcome.StatusText, "is uninstalled") {
+		t.Errorf("the words are %q, want them to name the case", outcome.StatusText)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("the workflow is still there: %v", err)
@@ -760,14 +752,14 @@ func TestHandle_TheAddressThatDoesNotFitIsEchoedAsItWasTyped(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the message settled without an outcome")
 	}
-	if outcome.Data["reason"] != ReasonInvalidAddress {
-		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonInvalidAddress)
+	if outcome.Status != http.StatusBadRequest {
+		t.Errorf("the status is %d, want %d", outcome.Status, http.StatusBadRequest)
 	}
 	if outcome.Data["address"] != "Coder" {
 		t.Errorf("the address is %q, want the one that was typed", outcome.Data["address"])
 	}
-	if detail := outcome.Data[messages.OutcomeKeyError]; !strings.Contains(detail, "kebab-case") {
-		t.Errorf("the detail is %q, want it to name the shape of the name", detail)
+	if !strings.Contains(outcome.StatusText, "kebab-case") {
+		t.Errorf("the words are %q, want them to name the shape of the name", outcome.StatusText)
 	}
 
 	tasks := em.tasks()

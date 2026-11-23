@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -11,6 +12,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/timeouts"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // withCommandTimeout applies the per-/gtw-command wall-clock
@@ -52,11 +54,7 @@ func requireCwd(ctx context.Context, cs *chatsession.ChatSession) (string, *comm
 	if failOut == nil {
 		return cwd, nil
 	}
-	reason := "no_cwd"
-	if cs == nil {
-		reason = "no_session"
-	}
-	reportOutcome(ctx, command.FailedOutcome(reason, "the command needs an active workspace"))
+	reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command needs an active workspace"))
 	return "", failOut
 }
 
@@ -396,7 +394,7 @@ func (f *Factory) Spec() command.Spec {
 // is bypassed; production callers must go through commander.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	if len(input.Args) < 2 {
-		reportOutcome(ctx, command.FailedOutcome("usage", "no /gtw subcommand was given"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "no /gtw subcommand was given"))
 		return &command.SlashOutput{
 			Reply:    f.Spec().Usage,
 			Consumed: true,
@@ -498,7 +496,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 	case "sync":
 		out, err = f.runSync(runCtx, rt, cs, input)
 	default:
-		reportOutcome(ctx, command.FailedOutcome("unknown_subcommand",
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest,
 			"unknown /gtw subcommand "+input.Args[1]))
 		return &command.SlashOutput{
 			Reply:    "Unknown subcommand: " + input.Args[1] + "\n" + f.Spec().Usage,
@@ -509,10 +507,10 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 		// Cancelled by /gtw abort: the abort card is the only
 		// message this run produces. The outcome is `cancelled` —
 		// the run did not fail, it was stopped.
-		chatsession.ReportOutcome(ctx, messages.Outcome{
-			Status:  messages.OutcomeCancelled,
-			Summary: "the command was cancelled by /gtw abort",
-			Data:    map[string]string{"reason": "aborted"},
+		chatsession.ReportOutcome(ctx, outcome.Outcome{
+			Success:    false,
+			Status:     outcome.StatusClientClosedRequest,
+			StatusText: "the command was cancelled by /gtw abort",
 		})
 		return &command.SlashOutput{Consumed: true}, nil
 	}
@@ -556,7 +554,7 @@ func (f *Factory) runPlan(ctx context.Context, cs *chatsession.ChatSession, inpu
 func (f *Factory) runAssign(ctx context.Context, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parseAssignArgs(input.Args[2:])
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -579,7 +577,7 @@ func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *cha
 	tail, line := gtwTail(input)
 	args, err := parseNewIssueArgs(tail, line)
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -612,7 +610,7 @@ func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *cha
 			return e
 		})
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("error", "the issues could not be created"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the issues could not be created"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw new failed: %v", err),
 			Consumed: true,
@@ -638,7 +636,7 @@ func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *cha
 // (empty argv) and parse-error replies stay in lockstep.
 func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	if len(input.Args) < 3 {
-		reportOutcome(ctx, command.FailedOutcome("usage", "no issue id or branch name was given"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "no issue id or branch name was given"))
 		return &command.SlashOutput{
 			Reply:    fixCmdSpec.Usage,
 			Consumed: true,
@@ -652,7 +650,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 		// post-parse checks (mutual exclusion, missing arg) do
 		// the same via spec.UsageTail(). A single "❌ " prefix
 		// is all the caller needs to layer on top.
-		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -668,7 +666,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 	if args.Mode == ModeLocal {
 		derived, derr := DeriveBranchFromName(args.RawArg)
 		if derr != nil {
-			reportOutcome(ctx, command.FailedOutcome("invalid_branch",
+			reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest,
 				"the branch name could not be derived"))
 			return &command.SlashOutput{
 				Reply:    fmt.Sprintf("❌ %v", derr),
@@ -684,7 +682,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 	// validate.
 	if args.Mode == ModeRemote && !args.Auto {
 		if _, err := parseIssueID(args.RawArg); err != nil {
-			reportOutcome(ctx, command.FailedOutcome("invalid_issue", "the issue id is not valid"))
+			reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the issue id is not valid"))
 			return &command.SlashOutput{
 				Reply:    fmt.Sprintf("Invalid issue id: %q (%v)", args.RawArg, err),
 				Consumed: true,
@@ -735,7 +733,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 			return e
 		})
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("error", "the worktree could not be created"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the worktree could not be created"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw fix failed: %v", err),
 			Consumed: true,
@@ -914,7 +912,7 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *c
 	// the user got no signal that --force did nothing.
 	parsed, err := command.ParseCmdArgs(input.Args[2:], closeCmdSpec)
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -952,7 +950,7 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *c
 			return e
 		})
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("error", "the worktree could not be closed"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the worktree could not be closed"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw close failed: %v", err),
 			Consumed: true,
@@ -994,7 +992,7 @@ func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *ch
 		MaxArgs: 1,
 	})
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -1037,7 +1035,7 @@ func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *ch
 				return e
 			})
 		if err != nil {
-			reportOutcome(ctx, command.FailedOutcome("error", "the worktree could not be entered"))
+			reportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the worktree could not be entered"))
 			return &command.SlashOutput{
 				Reply:    fmt.Sprintf("❌ /gtw back failed: %v", err),
 				Consumed: true,
@@ -1069,7 +1067,7 @@ func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *ch
 			return e
 		})
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("error", "the worktree could not be entered"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the worktree could not be entered"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw back failed: %v", err),
 			Consumed: true,
@@ -1096,7 +1094,7 @@ func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *ch
 func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parsePushArgs(input.Args[2:])
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -1122,7 +1120,7 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *ch
 			return e
 		})
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("error", "the branch could not be pushed"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the branch could not be pushed"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw push failed: %v", err),
 			Consumed: true,
@@ -1148,14 +1146,14 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *ch
 func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parseCommitArgs(input.Args[2:])
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
 		}, nil
 	}
 	if err := validateGTWFlags(args.Agent, args.Global, args.Unset, args.Continue); err != nil {
-		reportOutcome(ctx, command.FailedOutcome("usage", "the flag combination is not valid"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the flag combination is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v%s", err, commitCmdSpec.UsageTail()),
 			Consumed: true,
@@ -1168,13 +1166,13 @@ func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *
 	// workspace.
 	notices, done, writeFailed, err := applyGlobalScope(subCommit, args.Agent, args.Global, args.Unset, "committing")
 	if err != nil {
-		reason := "config_error"
+		status := http.StatusBadRequest
 		summary := "the commit agent could not be persisted"
 		if errors.Is(err, agent.ErrUnknownAgent) {
-			reason = "unknown_agent"
+			status = http.StatusNotFound
 			summary = "the commit agent is not a registered agent"
 		}
-		reportOutcome(ctx, command.FailedOutcome(reason, summary))
+		reportOutcome(ctx, command.FailedOutcome(status, summary))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -1183,10 +1181,10 @@ func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *
 	if writeFailed {
 		// The commit still runs, but persisting the agent did not
 		// happen — half of what was asked.
-		reportOutcome(ctx, messages.Outcome{
-			Status:  messages.OutcomeIncomplete,
-			Summary: "the commit agent could not be persisted",
-			Data:    map[string]string{"reason": "config_write_failed"},
+		reportOutcome(ctx, outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "the commit agent could not be persisted",
 		})
 	}
 	if len(notices) > 0 {
@@ -1194,10 +1192,11 @@ func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *
 	}
 	if done {
 		// --unset: the persisted default is gone and no commit runs.
-		reportOutcome(ctx, messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "the global commit agent was removed",
-			Data:    map[string]string{"scope": "global"},
+		reportOutcome(ctx, outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "the global commit agent was removed",
+			Data:       map[string]string{KeyScope: "global"},
 		})
 		return &command.SlashOutput{Consumed: true}, nil
 	}
@@ -1220,7 +1219,7 @@ func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *
 			return e
 		})
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("error", "the work could not be committed"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the work could not be committed"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw commit failed: %v", err),
 			Consumed: true,
@@ -1251,7 +1250,7 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, cs *ch
 		MinArgs: 0,
 		MaxArgs: 0,
 	}); err != nil {
-		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -1299,26 +1298,28 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, cs *ch
 			return nil
 		})
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("error", "the branch could not be synced"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the branch could not be synced"))
 		return &command.SlashOutput{Reply: fmt.Sprintf("❌ %v", err), Consumed: true}, nil
 	}
 	switch {
 	case syncFacts == nil:
-		reportOutcome(ctx, command.NoopOutcome("the sync was skipped", nil))
+		reportOutcome(ctx, command.SuccessOutcome("the sync was skipped", nil))
 	case !syncFacts.pulled:
 		// A sync is an unconditional refresh: a correct checkout and
 		// a pull with nothing to pull means the goal state holds, so
 		// the sync did what it was asked to do.
-		reportOutcome(ctx, messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "the branch was already up to date",
-			Data:    syncFacts.data(),
+		reportOutcome(ctx, outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "the branch was already up to date",
+			Data:       syncFacts.data(),
 		})
 	default:
-		reportOutcome(ctx, messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "the branch was synced",
-			Data:    syncFacts.data(),
+		reportOutcome(ctx, outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "the branch was synced",
+			Data:       syncFacts.data(),
 		})
 	}
 	return &command.SlashOutput{Reply: replyText, Consumed: true}, nil
@@ -1551,14 +1552,14 @@ func applyGlobalScope(sub, agentName string, global, unset bool, verb string) (n
 func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parsePRArgs(input.Args[2:])
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
 		}, nil
 	}
 	if err := validateGTWFlags(args.Agent, args.Global, args.Unset, args.Continue); err != nil {
-		reportOutcome(ctx, command.FailedOutcome("usage", "the flag combination is not valid"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the flag combination is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v%s", err, prCmdSpec.UsageTail()),
 			Consumed: true,
@@ -1571,13 +1572,13 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 	// workspace.
 	notices, done, writeFailed, err := applyGlobalScope(subPR, args.Agent, args.Global, args.Unset, "writing the PR")
 	if err != nil {
-		reason := "config_error"
+		status := http.StatusBadRequest
 		summary := "the PR agent could not be persisted"
 		if errors.Is(err, agent.ErrUnknownAgent) {
-			reason = "unknown_agent"
+			status = http.StatusNotFound
 			summary = "the PR agent is not a registered agent"
 		}
-		reportOutcome(ctx, command.FailedOutcome(reason, summary))
+		reportOutcome(ctx, command.FailedOutcome(status, summary))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -1586,10 +1587,10 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 	if writeFailed {
 		// The PR still runs, but persisting the agent did not
 		// happen — half of what was asked.
-		reportOutcome(ctx, messages.Outcome{
-			Status:  messages.OutcomeIncomplete,
-			Summary: "the PR agent could not be persisted",
-			Data:    map[string]string{"reason": "config_write_failed"},
+		reportOutcome(ctx, outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "the PR agent could not be persisted",
 		})
 	}
 	if len(notices) > 0 {
@@ -1597,10 +1598,11 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 	}
 	if done {
 		// --unset: the persisted default is gone and no PR runs.
-		reportOutcome(ctx, messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "the global PR agent was removed",
-			Data:    map[string]string{"scope": "global"},
+		reportOutcome(ctx, outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "the global PR agent was removed",
+			Data:       map[string]string{KeyScope: "global"},
 		})
 		return &command.SlashOutput{Consumed: true}, nil
 	}
@@ -1625,7 +1627,7 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 			return e
 		})
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("error", "the pull request could not be opened"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the pull request could not be opened"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw pr failed: %v", err),
 			Consumed: true,
@@ -1650,7 +1652,7 @@ func isPRView(args []string) bool {
 func (f *Factory) runPRView(ctx context.Context, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	number, err := parsePRViewArgs(input.Args[2:])
 	if err != nil {
-		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,

@@ -2,12 +2,13 @@ package gtw
 
 import (
 	"context"
+	"net/http"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 const placeholderTopicSection = "{{TOPIC_SECTION}}"
@@ -36,26 +37,27 @@ func RunPlan(
 	if messageID == "" {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ internal: missing message id; /gtw plan did not enqueue",
-			command.FailedOutcome("error", "the plan request could not be queued")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the plan request could not be queued")), nil
 	}
 	if _, err := RepoRoot(ctx, cs.SelectedCwd(), deps.Git); err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
-			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository")), nil
+			command.FailedOutcome(http.StatusBadRequest, "the workspace is not inside a git repository")), nil
 	}
 
 	blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: renderPlanPrompt(topic)}}
 	if err := dispatchIssueToChatSession(ctx, cs, deps.Now, chatID, messageID, blocks); err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ dispatch to agent: "+err.Error(),
-			command.FailedOutcome("error", "the plan request did not reach the agent")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the plan request did not reach the agent")), nil
 	}
 	// The prompt is queued — the agent's own turn verdict merges
 	// into this outcome when the turn ends.
-	reportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: "the agent was asked to plan",
-		Data:    map[string]string{"topic": strings.TrimSpace(topic)},
+	reportOutcome(ctx, outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the agent was asked to plan",
+		Data:       map[string]string{KeyTopic: strings.TrimSpace(topic)},
 	})
 	return &Result{Consumed: true}, nil
 }

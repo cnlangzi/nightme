@@ -33,6 +33,7 @@ package gtw
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 
@@ -55,7 +56,7 @@ func loadDispatchContext(
 	if cwd == "" {
 		return Context{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ no active workspace. Send /cwd <path> first.",
-			command.FailedOutcome("no_cwd", "no active workspace"))
+			command.FailedOutcome(http.StatusBadRequest, "no active workspace"))
 	}
 
 	c, err := ReadGTWYml(cwd)
@@ -64,14 +65,14 @@ func loadDispatchContext(
 		if c.Worktree == "" || c.Branch == "" || c.RepoRoot == "" {
 			return Context{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				"❌ .nightme/gtw.yml is malformed (worktree/branch/repoRoot required)",
-				command.FailedOutcome("bad_state", "the gtw state file is malformed"))
+				command.FailedOutcome(http.StatusInternalServerError, "the gtw state file is malformed"))
 		}
 		return c, nil
 	}
 	if !os.IsNotExist(err) {
 		return Context{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err),
-			command.FailedOutcome("bad_state", "the gtw state file could not be read"))
+			command.FailedOutcome(http.StatusInternalServerError, "the gtw state file could not be read"))
 	}
 
 	// yml-absent: derive from git. This branch lets /gtw commit,
@@ -83,20 +84,20 @@ func loadDispatchContext(
 	if err != nil {
 		return Context{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %s is not inside a git repository", cwd),
-			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository"))
+			command.FailedOutcome(http.StatusBadRequest, "the workspace is not inside a git repository"))
 	}
 	branchOut, _, err := deps.Git.Run(ctx, cwd, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return Context{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ cannot determine current branch in %s: %v", cwd, err),
-			command.FailedOutcome("error", "the current branch could not be determined"))
+			command.FailedOutcome(http.StatusInternalServerError, "the current branch could not be determined"))
 	}
 	branch := strings.TrimSpace(branchOut)
 	if branch == "" || branch == "HEAD" {
 		// detached HEAD — refuse rather than guess a PR target.
 		return Context{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %s is on a detached HEAD; checkout a named branch first", cwd),
-			command.FailedOutcome("detached", "the workspace is on a detached HEAD"))
+			command.FailedOutcome(http.StatusConflict, "the workspace is on a detached HEAD"))
 	}
 	return Context{
 		Mode:     ModeLocal,

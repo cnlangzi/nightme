@@ -15,6 +15,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -116,7 +117,7 @@ type roundRecord struct {
 	// EndedAt is when the round ended.
 	EndedAt time.Time `json:"ended_at"`
 	// Outcome is what the round came to.
-	Outcome wfe.Outcome `json:"outcome"`
+	Outcome outcome.Outcome `json:"outcome"`
 	// Status says whether the round produced work. A round that
 	// produced nothing stays out of the tree of the rounds.
 	Status wfe.RoundStatus `json:"status,omitempty"`
@@ -1021,7 +1022,7 @@ func (r *run) takeRefresh(now time.Time) bool {
 //
 // A step that was passed over keeps its record: the verdict that
 // arrives late does not put it back into the plan.
-func (r *run) recordStep(job string, step wfe.Step, out wfe.Outcome) {
+func (r *run) recordStep(job string, step wfe.Step, out outcome.Outcome) {
 	r.mu.Lock()
 	if r.stepSkippedLocked(step.ID) && !isSkippedOutcome(out) {
 		r.mu.Unlock()
@@ -1120,14 +1121,32 @@ func (r *run) renderPolicy() string {
 //
 // The record carries the round the step's job is in: the per-step
 // budgets count the actions of the current round only.
-func (r *run) record(kind wfe.ActionKind, command, stepID string, outcome wfe.Outcome) {
+func (r *run) record(kind wfe.ActionKind, command, stepID string, verdict outcome.Outcome) {
+	r.recordAction(kind, command, stepID, verdict, false)
+}
+
+// recordSkipped appends a step that was passed over to the policy's
+// history.
+//
+// The history has to agree with the run state: the step was skipped,
+// and the run says so.
+func (r *run) recordSkipped(command, stepID string, verdict outcome.Outcome) {
+	r.recordAction(wfe.ActionKindRun, command, stepID, verdict, true)
+}
+
+// recordAction appends an action to the policy's history.
+//
+// The record carries the round the step's job is in: the per-step
+// budgets count the actions of the current round only.
+func (r *run) recordAction(kind wfe.ActionKind, command, stepID string, verdict outcome.Outcome, skipped bool) {
 	r.mu.Lock()
 	r.policy.Record(wfe.ActionRecord{
 		Kind:    kind,
 		Command: command,
 		StepID:  stepID,
 		Round:   r.roundOf(stepID),
-		Outcome: outcome,
+		Outcome: verdict,
+		Skipped: skipped,
 		At:      r.svc.now(),
 	})
 	r.mu.Unlock()
@@ -1169,7 +1188,7 @@ func (r *run) lastVerdict() (wfe.ActionRecord, bool) {
 }
 
 // lastOutcome returns the outcome of the last step that ran.
-func (r *run) lastOutcome() (wfe.Outcome, bool) {
+func (r *run) lastOutcome() (outcome.Outcome, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return wfe.LastOutcome(r.state)
@@ -1253,14 +1272,6 @@ func (r *run) setWorkCwd(dir string) bool {
 	env["WORKSPACE_CWD"] = dir
 	r.state.Env = env
 	return changed
-}
-
-// outcomeLine renders an outcome as one human-readable line.
-func outcomeLine(o messages.Outcome) string {
-	if o.Summary != "" {
-		return o.Summary
-	}
-	return string(o.Status)
 }
 
 // pendingCallList returns the tool calls that still have to run.

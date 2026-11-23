@@ -7,10 +7,12 @@
 package me
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -45,7 +47,7 @@ func TestTheRoundsTreeLeavesOutTheRoundThatProducedNothing(t *testing.T) {
 			Job:       "main",
 			StartedAt: start,
 			EndedAt:   start.Add(time.Minute),
-			Outcome:   wfe.Outcome{Status: wfe.OutcomeOK},
+			Outcome:   outcome.Outcome{Status: http.StatusOK},
 			Status:    wfe.RoundStatusWorked,
 		},
 		{
@@ -53,7 +55,7 @@ func TestTheRoundsTreeLeavesOutTheRoundThatProducedNothing(t *testing.T) {
 			Job:       "main",
 			StartedAt: start.Add(time.Minute),
 			EndedAt:   start.Add(2 * time.Minute),
-			Outcome:   wfe.Outcome{Status: wfe.OutcomeNoop},
+			Outcome:   outcome.Outcome{Status: http.StatusOK},
 			Status:    wfe.RoundStatusSilent,
 		},
 	}
@@ -83,7 +85,7 @@ func TestTheRecordCardLeavesOutTheRoundThatProducedNothing(t *testing.T) {
 			Job:       "main",
 			StartedAt: start,
 			EndedAt:   start.Add(time.Minute),
-			Outcome:   wfe.Outcome{Status: wfe.OutcomeOK},
+			Outcome:   outcome.Outcome{Status: http.StatusOK},
 			Status:    wfe.RoundStatusWorked,
 		},
 		{
@@ -91,7 +93,7 @@ func TestTheRecordCardLeavesOutTheRoundThatProducedNothing(t *testing.T) {
 			Job:       "main",
 			StartedAt: start.Add(time.Minute),
 			EndedAt:   start.Add(2 * time.Minute),
-			Outcome:   wfe.Outcome{Status: wfe.OutcomeNoop},
+			Outcome:   outcome.Outcome{Status: http.StatusOK},
 			Status:    wfe.RoundStatusSilent,
 		},
 	}
@@ -121,7 +123,7 @@ func TestTheFoldedRoundsCountTheRoundsThatWorked(t *testing.T) {
 			Job:       "main",
 			StartedAt: start.Add(time.Duration(i) * time.Minute),
 			EndedAt:   start.Add(time.Duration(i)*time.Minute + time.Second),
-			Outcome:   wfe.Outcome{Status: wfe.OutcomeOK},
+			Outcome:   outcome.Outcome{Status: http.StatusOK},
 			Status:    status,
 		})
 	}
@@ -156,7 +158,7 @@ func TestARoundWithoutAStatusStaysInTheTree(t *testing.T) {
 		Job:       "main",
 		StartedAt: start,
 		EndedAt:   start.Add(time.Minute),
-		Outcome:   wfe.Outcome{Status: wfe.OutcomeOK},
+		Outcome:   outcome.Outcome{Status: http.StatusOK},
 	}}
 
 	tree := r.roundsTree(iteration{job: "main", round: 2})
@@ -171,13 +173,13 @@ func TestTheRoundThatEndedCarriesItsStatus(t *testing.T) {
 	r := roundStatusRun(t)
 
 	at := time.Date(2026, 11, 18, 10, 33, 4, 0, time.UTC)
-	r.record(wfe.ActionKindRun, "/gtw commit", "commit", wfe.Outcome{Status: wfe.OutcomeOK})
+	r.record(wfe.ActionKindRun, "/gtw commit", "commit", outcome.Outcome{Status: http.StatusOK})
 	worked := r.closeRound("main", 1, at.Add(time.Minute))
 	if worked.Status != wfe.RoundStatusWorked {
 		t.Errorf("the round that ran a step is %q, want %q", worked.Status, wfe.RoundStatusWorked)
 	}
 
-	r.record(wfe.ActionKindRun, "/gtw commit", "commit", wfe.Outcome{Status: wfe.OutcomeNoop})
+	r.record(wfe.ActionKindRun, "/gtw commit", "commit", outcome.Outcome{Status: http.StatusOK})
 	silent := r.closeRound("main", 2, at.Add(2*time.Minute))
 	if silent.Status != wfe.RoundStatusSilent {
 		t.Errorf("the round that had nothing to do is %q, want %q", silent.Status, wfe.RoundStatusSilent)

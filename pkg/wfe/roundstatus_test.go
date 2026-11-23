@@ -1,6 +1,11 @@
 package wfe
 
-import "testing"
+import (
+	"net/http"
+	"testing"
+
+	"github.com/cnlangzi/nightme/pkg/outcome"
+)
 
 // roundStatusYAML is a workflow with a step that waits and a second
 // job: a round belongs to one job, and a wait is not work.
@@ -20,7 +25,7 @@ jobs:
 `
 
 // runOf builds the action of a step that ran.
-func runOf(stepID string, out Outcome) ActionRecord {
+func runOf(stepID string, out outcome.Outcome) ActionRecord {
 	return ActionRecord{Kind: ActionKindRun, StepID: stepID, Round: 1, Outcome: out}
 }
 
@@ -38,50 +43,51 @@ func TestPolicy_RoundStatus(t *testing.T) {
 		},
 		{
 			name:    "a step that ran and came to something",
-			history: []ActionRecord{runOf("fix", Outcome{Status: OutcomeOK})},
+			history: []ActionRecord{runOf("fix", outcome.Outcome{Success: true, Status: http.StatusOK})},
 			want:    RoundStatusWorked,
 		},
 		{
-			name:    "a step that had nothing to do",
-			history: []ActionRecord{runOf("fix", Outcome{Status: OutcomeNoop})},
+			name:    "a step that was passed over",
+			history: []ActionRecord{{Kind: ActionKindRun, StepID: "fix", Round: 1, Skipped: true}},
 			want:    RoundStatusSilent,
 		},
 		{
 			name:    "a step that found nothing to do",
-			history: []ActionRecord{runOf("fix", Outcome{Status: OutcomeFailed, Summary: "nothing to commit"})},
-			want:    RoundStatusSilent,
+			history: []ActionRecord{runOf("fix", outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "nothing to commit"})},
+			want:    RoundStatusWorked,
 		},
 		{
 			name: "a step that broke",
-			history: []ActionRecord{runOf("fix", Outcome{
-				Status: OutcomeFailed,
-				Data:   map[string]string{OutcomeKeyError: "the remote refused"},
+			history: []ActionRecord{runOf("fix", outcome.Outcome{
+				Success:    false,
+				Status:     http.StatusInternalServerError,
+				StatusText: "the remote refused",
 			})},
 			want: RoundStatusWorked,
 		},
 		{
 			name:    "a step that did not finish",
-			history: []ActionRecord{runOf("fix", Outcome{Status: OutcomeIncomplete})},
+			history: []ActionRecord{runOf("fix", outcome.Outcome{Success: false, Status: http.StatusInternalServerError})},
 			want:    RoundStatusWorked,
 		},
 		{
 			name:    "a step that was stopped",
-			history: []ActionRecord{runOf("fix", Outcome{Status: OutcomeCancelled})},
+			history: []ActionRecord{runOf("fix", outcome.Outcome{Success: false, Status: outcome.StatusClientClosedRequest})},
 			want:    RoundStatusWorked,
 		},
 		{
 			name:    "a step that ran out of time",
-			history: []ActionRecord{runOf("fix", Outcome{Status: OutcomeTimeout})},
+			history: []ActionRecord{runOf("fix", outcome.Outcome{Success: false, Status: http.StatusRequestTimeout})},
 			want:    RoundStatusWorked,
 		},
 		{
 			name:    "a step that reported no verdict",
-			history: []ActionRecord{runOf("fix", Outcome{Status: OutcomeUnknown})},
+			history: []ActionRecord{runOf("fix", outcome.Outcome{Success: false, Status: 0})},
 			want:    RoundStatusWorked,
 		},
 		{
 			name:    "a step that waited",
-			history: []ActionRecord{runOf("rest", Outcome{Status: OutcomeOK})},
+			history: []ActionRecord{runOf("rest", outcome.Outcome{Success: true, Status: http.StatusOK})},
 			want:    RoundStatusSilent,
 		},
 		{
@@ -110,7 +116,7 @@ func TestPolicy_RoundStatus(t *testing.T) {
 				Kind:    ActionKindRun,
 				StepID:  "fix",
 				Round:   2,
-				Outcome: Outcome{Status: OutcomeOK},
+				Outcome: outcome.Outcome{Success: true, Status: http.StatusOK},
 			}},
 			want: RoundStatusSilent,
 		},
@@ -120,7 +126,7 @@ func TestPolicy_RoundStatus(t *testing.T) {
 				Kind:    ActionKindRun,
 				StepID:  "ship",
 				Round:   1,
-				Outcome: Outcome{Status: OutcomeOK},
+				Outcome: outcome.Outcome{Success: true, Status: http.StatusOK},
 			}},
 			want: RoundStatusSilent,
 		},
@@ -129,15 +135,15 @@ func TestPolicy_RoundStatus(t *testing.T) {
 			history: []ActionRecord{{
 				Kind:    ActionKindRun,
 				Round:   1,
-				Outcome: Outcome{Status: OutcomeOK},
+				Outcome: outcome.Outcome{Success: true, Status: http.StatusOK},
 			}},
 			want: RoundStatusSilent,
 		},
 		{
 			name: "a wait beside a step that worked",
 			history: []ActionRecord{
-				runOf("rest", Outcome{Status: OutcomeOK}),
-				runOf("fix", Outcome{Status: OutcomeOK}),
+				runOf("rest", outcome.Outcome{Success: true, Status: http.StatusOK}),
+				runOf("fix", outcome.Outcome{Success: true, Status: http.StatusOK}),
 			},
 			want: RoundStatusWorked,
 		},
@@ -159,8 +165,8 @@ func TestPolicy_RoundStatusReadsTheRoundOfTheAction(t *testing.T) {
 	wf := mustParse(t, roundStatusYAML)
 
 	p := NewPolicy(wf, []ActionRecord{
-		{Kind: ActionKindRun, StepID: "fix", Round: 1, Outcome: Outcome{Status: OutcomeOK}},
-		{Kind: ActionKindRun, StepID: "fix", Round: 2, Outcome: Outcome{Status: OutcomeNoop}},
+		{Kind: ActionKindRun, StepID: "fix", Round: 1, Outcome: outcome.Outcome{Success: true, Status: http.StatusOK}},
+		{Kind: ActionKindRun, StepID: "fix", Round: 2, Outcome: outcome.Outcome{Success: true, Status: http.StatusOK}, Skipped: true},
 	})
 
 	if got := p.RoundStatus("main", 1); got != RoundStatusWorked {
@@ -180,7 +186,7 @@ func TestPolicy_RoundStatusReadsTheJobOfTheAction(t *testing.T) {
 	wf := mustParse(t, roundStatusYAML)
 
 	p := NewPolicy(wf, []ActionRecord{
-		{Kind: ActionKindRun, StepID: "ship", Round: 1, Outcome: Outcome{Status: OutcomeOK}},
+		{Kind: ActionKindRun, StepID: "ship", Round: 1, Outcome: outcome.Outcome{Success: true, Status: http.StatusOK}},
 	})
 
 	if got := p.RoundStatus("main", 1); got != RoundStatusSilent {

@@ -80,12 +80,11 @@ func workflowStepIDs(wf *wfe.Workflow) []string {
 }
 
 // isErrorStatus reports whether an action went wrong.
-func isErrorStatus(status wfe.OutcomeStatus) bool {
-	switch status {
-	case wfe.OutcomeFailed, wfe.OutcomeIncomplete, wfe.OutcomeCancelled, wfe.OutcomeTimeout:
-		return true
-	}
-	return false
+//
+// A 4xx or a 5xx went wrong. A status of zero says nobody reported a
+// verdict, which is not the same thing.
+func isErrorStatus(status int) bool {
+	return status >= 400
 }
 
 // errorLines renders the actions that went wrong.
@@ -123,13 +122,10 @@ func errorLines(history []wfe.ActionRecord) []string {
 // build log as its summary, and a card that carries it is unreadable.
 func errorLine(rec wfe.ActionRecord) string {
 	out := rec.Outcome
-	line := fmt.Sprintf("[ %s ] %s — %s",
+	line := fmt.Sprintf("[ %s ] %s — %d",
 		outcomeIcon(out.Status), clipLine(rec.Command, maxSummaryCommand), out.Status)
-	if out.Summary != "" {
-		line += ": " + clipLine(out.Summary, maxSummaryText)
-	}
-	if reason := out.Data["reason"]; reason != "" {
-		line += " (reason: " + reason + ")"
+	if out.StatusText != "" {
+		line += ": " + clipLine(out.StatusText, maxSummaryText)
 	}
 	return clipLine(line, maxSummaryLine)
 }

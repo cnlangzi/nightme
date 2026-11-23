@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -208,13 +209,13 @@ func resolveRemoteTarget(
 	if err != nil {
 		return remoteTarget{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
-			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository"))
+			command.FailedOutcome(http.StatusBadRequest, "the workspace is not inside a git repository"))
 	}
 	remoteURL, err := RemoteOriginURL(ctx, repoRoot, deps.Git)
 	if err != nil || remoteURL == "" {
 		return remoteTarget{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ No `origin` remote. Add one with `git remote add origin <url>`.",
-			command.FailedOutcome("no_remote", "the repository has no origin remote"))
+			command.FailedOutcome(http.StatusBadRequest, "the repository has no origin remote"))
 	}
 	// The provider needs a real directory to run gh / glab in — the
 	// repository root is one, even when the daemon's own cwd is
@@ -226,18 +227,18 @@ func resolveRemoteTarget(
 		// recognised as GitHub/GitLab".
 		card, summary := providerErrorCard(remoteURL, err)
 		return remoteTarget{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID, card,
-			command.FailedOutcome("provider_error", summary))
+			command.FailedOutcome(http.StatusServiceUnavailable, summary))
 	}
 	if provider == nil {
 		return remoteTarget{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ Provider detection returned no result (deps.Detect override bug).",
-			command.FailedOutcome("provider_error", "the git platform could not be detected"))
+			command.FailedOutcome(http.StatusServiceUnavailable, "the git platform could not be detected"))
 	}
 	owner, repo, err := ParseRepoOwner(remoteURL)
 	if err != nil {
 		return remoteTarget{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ Cannot parse owner/repo from remote URL %s.", redactForDisplay(remoteURL)),
-			command.FailedOutcome("provider_error", "the remote URL does not name a repository"))
+			command.FailedOutcome(http.StatusServiceUnavailable, "the remote URL does not name a repository"))
 	}
 	return remoteTarget{
 		RepoRoot: repoRoot,

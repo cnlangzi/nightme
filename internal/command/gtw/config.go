@@ -4,17 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"gopkg.in/yaml.v3"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/yamlfile"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // defaultLanguage is the output language used when neither the
@@ -320,14 +320,14 @@ func RunConfig(
 	parsed, err := command.ParseCmdArgs(argv, configCmdSpec)
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, "❌ "+err.Error(),
-			command.FailedOutcome("usage", "the command line is not valid")), nil
+			command.FailedOutcome(http.StatusBadRequest, "the command line is not valid")), nil
 	}
 
 	key := parsed.Arg(0)
 	if key != langKey {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ unknown config key: %s\n  known keys: %s", key, langKey),
-			command.FailedOutcome("usage", "unknown config key "+key)), nil
+			command.FailedOutcome(http.StatusBadRequest, "unknown config key "+key)), nil
 	}
 
 	global := parsed.Bool("global")
@@ -341,7 +341,7 @@ func RunConfig(
 	if unset && hasValue {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ --unset takes the key only: "+configCmdSpec.Usage,
-			command.FailedOutcome("usage", "the command line is not valid")), nil
+			command.FailedOutcome(http.StatusBadRequest, "the command line is not valid")), nil
 	}
 	// An empty value is "not set" — it removes the entry instead of
 	// writing an empty one.
@@ -371,14 +371,14 @@ func RunConfig(
 	if cwd == "" {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ no active workspace. Send /cwd <path> first.",
-			command.FailedOutcome("no_cwd", "the command needs an active workspace")), nil
+			command.FailedOutcome(http.StatusBadRequest, "the command needs an active workspace")), nil
 	}
 	repo, err := repoKey(ctx, cwd, deps.Git)
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ cannot determine the repository key: %v\n"+
 				"  hint: use `/gtw config -g %s <value>` for the user-level scope", err, langKey),
-			command.FailedOutcome("error", "the repository key could not be determined")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the repository key could not be determined")), nil
 	}
 	return configWriteReply(ctx, cs, chatID, messageID, unset, scopeRepo, value, repo,
 		func() error {
@@ -417,7 +417,7 @@ func configWriteReply(
 	if err := write(); err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %v", err),
-			command.FailedOutcome("error", "the setting could not be written")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the setting could not be written")), nil
 	}
 	headline := fmt.Sprintf("✅ gtw.lang = %s (%s)", value, scope)
 	if unset {
@@ -427,25 +427,26 @@ func configWriteReply(
 	if repo != "" {
 		lines = append(lines, "→ repo: "+repo)
 	}
-	data := map[string]string{"scope": scopeCode(scope)}
+	data := map[string]string{KeyScope: scopeCode(scope)}
 	summary := "the gtw output language was changed"
 	if unset {
 		// An unset removes the entry — nothing was "changed" into
 		// a new value, and an empty `lang` alone cannot say so.
-		data["lang"] = ""
-		data["unset"] = "true"
+		data[KeyLang] = ""
+		data[BoolKeyUnset] = "true"
 		summary = "the gtw output language was unset"
 	} else {
-		data["lang"] = value
+		data[KeyLang] = value
 	}
 	if repo != "" {
-		data["repo"] = repo
+		data[KeyRepo] = repo
 	}
 	return replyOutcome(ctx, cs.Emitter(), chatID, messageID, strings.Join(lines, "\n"),
-		messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: summary,
-			Data:    data,
+		outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: summary,
+			Data:       data,
 		}), nil
 }
 
@@ -475,6 +476,6 @@ func configQuery(
 	}
 	return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 		"✨ gtw.lang = "+lang+" ("+string(scope)+")\n"+warnings,
-		command.NoopOutcome("the effective output language is unchanged",
-			map[string]string{"lang": lang, "scope": scopeCode(scope)})), nil
+		command.SuccessOutcome("the effective output language is unchanged",
+			map[string]string{KeyLang: lang, KeyScope: scopeCode(scope)})), nil
 }

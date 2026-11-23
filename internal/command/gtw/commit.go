@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -11,6 +12,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/timeouts"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // dispatchCommit runs /gtw commit — single-purpose: take the
@@ -74,12 +76,12 @@ func dispatchCommit(
 		if !ok {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				"❌ no failed /gtw commit to continue — run /gtw commit first",
-				command.FailedOutcome("no_continue", "this chat has no failed /gtw commit to continue")), nil
+				command.FailedOutcome(http.StatusNotFound, "this chat has no failed /gtw commit to continue")), nil
 		}
 		if !rec.failed {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				"ℹ️ the last /gtw commit completed — nothing to continue",
-				command.NoopOutcome("the last /gtw commit completed — nothing to continue", nil)), nil
+				command.SuccessOutcome("the last /gtw commit completed — nothing to continue", nil)), nil
 		}
 		cont = &rec
 		c = rec.ctx
@@ -98,13 +100,13 @@ func dispatchCommit(
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ read worktree status: %v", err),
-			command.FailedOutcome("error", "the worktree status could not be read")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the worktree status could not be read")), nil
 	}
 	if snap == nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ cannot read worktree git status — refusing to commit\n"+
 				"hint: ensure the worktree is inside a git repo with at least one commit",
-			command.FailedOutcome("not_a_repo", "the worktree is not a git repository")), nil
+			command.FailedOutcome(http.StatusBadRequest, "the worktree is not a git repository")), nil
 	}
 
 	// 1. Hard-refuse conflicts. Even if commit doesn't push, an
@@ -112,7 +114,7 @@ func dispatchCommit(
 	// should resolve (or `git rebase --abort`) first.
 	if reason := snap.PushBlockReason(); reason != "" {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, reason,
-			command.FailedOutcome("conflict", "the worktree has unresolved conflicts")), nil
+			command.FailedOutcome(http.StatusConflict, "the worktree has unresolved conflicts")), nil
 	}
 
 	// 1b. Refuse detached HEAD. Mirrors dispatchPush's
@@ -121,7 +123,7 @@ func dispatchCommit(
 	if snap.Branch == "" {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ detached HEAD — checkout a named branch first",
-			command.FailedOutcome("detached", "the worktree is on a detached HEAD")), nil
+			command.FailedOutcome(http.StatusConflict, "the worktree is on a detached HEAD")), nil
 	}
 
 	// 2. Nothing to commit. A commit runs because the worktree
@@ -143,7 +145,7 @@ func dispatchCommit(
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ read HEAD: %v", err),
-			command.FailedOutcome("error", "HEAD could not be read")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "HEAD could not be read")), nil
 	}
 
 	// 4. Run agent. runAgentFor returns the full RunResult so the
@@ -170,14 +172,14 @@ func dispatchCommit(
 			sessionID: runRes.SessionID,
 			failed:    true,
 		})
-		reason := "agent_error"
+		status := http.StatusInternalServerError
 		if errors.Is(err, agent.ErrUnknownAgent) {
-			reason = "unknown_agent"
+			status = http.StatusNotFound
 		}
 		return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,
 			err.Error(), agentName, runRes,
-			command.FailedOutcomeData(reason, "the agent did not commit the work",
-				map[string]string{"agent": agentName})), nil
+			command.FailedOutcomeData(status, "the agent did not commit the work",
+				map[string]string{KeyAgent: agentName})), nil
 	}
 
 	// 4b. (no cs-level GitStatus refresh needed post-RunOnce:
@@ -196,7 +198,7 @@ func dispatchCommit(
 			failed:    true,
 		})
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, msg,
-			command.FailedOutcome("not_committed", "the agent did not commit the work")), nil
+			command.FailedOutcome(http.StatusConflict, "the agent did not commit the work")), nil
 	}
 
 	// 6. Re-snapshot. Rare but documented: an agent can produce
@@ -208,17 +210,17 @@ func dispatchCommit(
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ re-read worktree status after agent: %v", err),
-			command.FailedOutcome("error", "the worktree status could not be re-read")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the worktree status could not be re-read")), nil
 	}
 	if snap == nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ cannot read worktree git status — refusing to commit\n"+
 				"hint: ensure the worktree is inside a git repo with at least one commit",
-			command.FailedOutcome("not_a_repo", "the worktree is not a git repository")), nil
+			command.FailedOutcome(http.StatusBadRequest, "the worktree is not a git repository")), nil
 	}
 	if reason := snap.PushBlockReason(); reason != "" {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, reason,
-			command.FailedOutcome("conflict", "the agent left unresolved conflicts")), nil
+			command.FailedOutcome(http.StatusConflict, "the agent left unresolved conflicts")), nil
 	}
 
 	// 7. Build the success card from git log — NOT from agent
@@ -232,7 +234,7 @@ func dispatchCommit(
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ commit landed but couldn't render card: %v", err),
-			command.FailedOutcome("error", "the commit landed but its result could not be read")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the commit landed but its result could not be read")), nil
 	}
 	// The work is committed: there is nothing left to continue. The
 	// record says so, so a later `--continue` can tell the user
@@ -247,14 +249,15 @@ func dispatchCommit(
 	// result, so footer metadata isn't applicable.
 	return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,
 		card, agentName, runRes,
-		messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: fmt.Sprintf("committed %d change(s) on %s", commitCount, c.Branch),
+		outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: fmt.Sprintf("committed %d change(s) on %s", commitCount, c.Branch),
 			Data: map[string]string{
-				"branch":    c.Branch,
-				"sha_range": headBefore + "..HEAD",
-				"commits":   fmt.Sprintf("%d", commitCount),
-				"agent":     agentName,
+				KeyBranch:   c.Branch,
+				KeySHARange: headBefore + "..HEAD",
+				KeyCommits:  fmt.Sprintf("%d", commitCount),
+				KeyAgent:    agentName,
 			},
 		}), nil
 }
@@ -360,39 +363,61 @@ func commitAgentPhase(
 // A branch ahead of its baseline is a normal branch: the work was
 // committed before, so there was nothing to commit. A branch that is
 // not ahead is an exception: there is genuinely nothing to commit.
-func commitFallback(ctx context.Context, c Context, branch string, deps HandlerDeps) (string, messages.Outcome) {
+func commitFallback(ctx context.Context, c Context, branch string, deps HandlerDeps) (string, outcome.Outcome) {
 	base, err := commitBaseline(ctx, c, deps)
 	if err != nil {
 		return commitNothingToCommitCard(branch),
-			command.FailedOutcomeData("nothing_to_commit", "the worktree has nothing to commit",
-				map[string]string{"branch": branch},
-				"the worktree has no changes and its baseline could not be determined: "+err.Error())
+			command.FailedOutcomeData(http.StatusInternalServerError,
+				"the worktree has no changes and its baseline could not be determined: "+err.Error(),
+				map[string]string{KeyBranch: branch})
 	}
 	commits, err := agentCommits(ctx, c.Worktree, base, deps)
 	if err != nil {
 		return commitNothingToCommitCard(branch),
-			command.FailedOutcomeData("nothing_to_commit", "the worktree has nothing to commit",
-				map[string]string{"branch": branch},
-				"the worktree has no changes and the local log could not be read: "+err.Error())
+			command.FailedOutcomeData(http.StatusInternalServerError,
+				"the worktree has no changes and the local log could not be read: "+err.Error(),
+				map[string]string{KeyBranch: branch})
 	}
 	if len(commits) == 0 {
 		return commitNothingToCommitCard(branch),
-			command.FailedOutcomeData("nothing_to_commit", "the worktree has nothing to commit",
-				map[string]string{"branch": branch},
-				"the worktree has no changes and the branch carries no commit since "+base)
+			command.SuccessOutcome(
+				"the worktree has no changes and the branch carries no commit since "+base,
+				commitNothingFacts(ctx, c, branch, deps))
 	}
 	// The work was committed before this command ran: a normal
 	// branch — there was nothing to do, and nothing broke.
 	card := "✅ nothing to commit — the work was already committed\n" +
 		"  " + strings.Join(commits, "\n  ")
-	return card, command.BranchOutcome("nothing_to_commit",
-		fmt.Sprintf("the work was already committed (%d commit(s))", len(commits)),
+	return card, command.SuccessOutcome(fmt.Sprintf("the work was already committed (%d commit(s))", len(commits)),
 		map[string]string{
-			"branch":     branch,
-			"commits":    fmt.Sprintf("%d", len(commits)),
-			"commit_log": strings.Join(commits, "\n"),
-			"sha_range":  base + "..HEAD",
+			KeyBranch:    branch,
+			KeyCommits:   fmt.Sprintf("%d", len(commits)),
+			KeyCommitLog: strings.Join(commits, "\n"),
+			KeySHARange:  base + "..HEAD",
 		})
+}
+
+// commitNothingFacts reports what a worktree that carries nothing to
+// commit holds.
+//
+// The counts say the worktree is clean and that no commit landed: the
+// program reads them to tell "there was nothing to commit" from "the
+// work was committed before".
+func commitNothingFacts(ctx context.Context, c Context, branch string, deps HandlerDeps) map[string]string {
+	facts := map[string]string{
+		KeyBranch:  branch,
+		KeyCommits: "0",
+	}
+	counts, err := countWorktreeChanges(ctx, c.Worktree, deps)
+	if err != nil {
+		return facts
+	}
+	facts[KeyChanges] = fmt.Sprintf("%d", counts.total())
+	facts[KeyPaths] = fmt.Sprintf("%d", counts.paths)
+	facts[KeyStaged] = fmt.Sprintf("%d", counts.staged)
+	facts[KeyUnstaged] = fmt.Sprintf("%d", counts.unstaged)
+	facts[KeyUntracked] = fmt.Sprintf("%d", counts.untracked)
+	return facts
 }
 
 // commitNothingToCommitCard is the card of a worktree that carries

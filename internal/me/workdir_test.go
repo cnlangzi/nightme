@@ -87,8 +87,8 @@ func TestRepoStatus_ReadsTheChatDirectory(t *testing.T) {
 	if res.Data["cwd"] != worktree {
 		t.Errorf("the directory is %q, want %q", res.Data["cwd"], worktree)
 	}
-	if res.Summary != "feature" {
-		t.Errorf("the summary is %q, want the branch", res.Summary)
+	if res.StatusText != "feature" {
+		t.Errorf("the summary is %q, want the branch", res.StatusText)
 	}
 }
 

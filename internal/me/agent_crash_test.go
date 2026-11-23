@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/llm"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // panickingDecider panics when the run asks it for a decision.
@@ -27,9 +28,10 @@ func TestAPanicInTheRunFailsTheRunAndLeavesTheDaemonAlone(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	svc, op := testService(t, dir, Config{Decider: panickingDecider{}, Logger: logger})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "the step failed",
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the step failed",
 	}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{

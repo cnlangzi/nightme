@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -352,7 +353,8 @@ func TestSelectNextAssignedIssue_NoCandidates(t *testing.T) {
 }
 
 // TestAutoNoCandidateOutcome pins the outcome the personal agent
-// reads: a failure carrying the wake-up hint and the counters.
+// reads: a success that carries the wake-up hint and the counters,
+// and no issue — there was none to pick.
 func TestAutoNoCandidateOutcome(t *testing.T) {
 	sel := &autoSelection{Counters: autoCounters{
 		Candidates:   4,
@@ -361,11 +363,16 @@ func TestAutoNoCandidateOutcome(t *testing.T) {
 		PROpen:       1,
 	}}
 	o := autoNoCandidateOutcome(sel)
-	if o.Status != "failed" {
-		t.Errorf("status = %q, want failed", o.Status)
+	if o.Status != http.StatusOK {
+		t.Errorf("status = %d, want %d", o.Status, http.StatusOK)
+	}
+	if !o.Success {
+		t.Error("an empty queue is not a failure")
+	}
+	if _, ok := o.Data[KeyIssue]; ok {
+		t.Error("the empty queue carries no issue")
 	}
 	want := map[string]string{
-		"reason":        "no_candidate",
 		"wake_after":    "5m",
 		"candidates":    "4",
 		"held":          "0",

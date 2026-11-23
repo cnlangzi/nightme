@@ -85,4 +85,9 @@ type PromptEndedEvent struct {
 	Reason         agent.PromptEndReason
 	EndedAt        time.Time
 	AgentSessionID string
+	// Err is the failure the turn reported, when it reported one. An
+	// upstream failure that carries an HTTP status rides on it, so a
+	// subscriber knows what the upstream said without reading the
+	// transcript.
+	Err error
 }

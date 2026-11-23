@@ -25,10 +25,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // Factory is the command.SlashCommandFactory for /stop.
@@ -96,12 +97,12 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
 	if cs == nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("no_session", "the chat has no session"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the chat has no session"))
 		return command.Reply(ctx, rt, "No active chat session."), nil
 	}
 
 	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("no_cwd", "the command needs an active workspace"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command needs an active workspace"))
 		return failOut, nil
 	}
 
@@ -109,7 +110,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// subcommands. Treating a typo'd arg as "still stop" would
 	// mask user error.
 	if _, err := command.ParseCmdArgs(input.Args[1:], stopSpec); err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
@@ -117,11 +118,11 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	result, err := StopSelectedAgent(cmd)
 	if err != nil {
 		if errors.Is(err, chatsession.ErrNoSelectedAgent) {
-			chatsession.ReportOutcome(ctx, command.FailedOutcome("no_agent", "no agent is selected"))
+			chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "no agent is selected"))
 			return command.OutReply(input,
 				"No active agent to stop. Use /use <agent> first."), nil
 		}
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the agent could not be stopped"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the agent could not be stopped"))
 		return command.OutReply(input, fmt.Sprintf("Stop failed: %v", err)), nil
 	}
 	chatsession.ReportOutcome(ctx, stopOutcome(result))
@@ -133,27 +134,29 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 // The stopped turn belongs to an EARLIER inbound message — that one
 // settles as cancelled. This command's own message reports what the
 // stop itself did.
-func stopOutcome(result Result) messages.Outcome {
+func stopOutcome(result Result) outcome.Outcome {
 	data := map[string]string{}
 	if result.Agent != "" {
-		data["agent"] = result.Agent
+		data[KeyAgent] = result.Agent
 	}
 	switch result.Action {
 	case "stopped":
-		return messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "the agent was stopped",
-			Data:    data,
+		return outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "the agent was stopped",
+			Data:       data,
 		}
 	case "noop":
-		return messages.Outcome{
-			Status:  messages.OutcomeNoop,
-			Summary: "no turn was in flight",
-			Data:    data,
+		return outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "no turn was in flight",
+			Data:       data,
 		}
 	case "not-supported":
-		return command.FailedOutcomeData("not_supported", "the agent does not support /stop", data)
+		return command.FailedOutcomeData(http.StatusNotImplemented, "the agent does not support /stop", data)
 	default:
-		return command.FailedOutcomeData("error", "the agent could not be stopped", data)
+		return command.FailedOutcomeData(http.StatusInternalServerError, "the agent could not be stopped", data)
 	}
 }

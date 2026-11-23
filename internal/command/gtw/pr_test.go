@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -2651,8 +2652,8 @@ func TestDispatchPR_RetryStillFailsRefusesPR(t *testing.T) {
 	if out == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if out.Data["reason"] != "agent_error" {
-		t.Fatalf("outcome reason = %q, want agent_error", out.Data["reason"])
+	if out.Status != http.StatusInternalServerError {
+		t.Errorf("outcome status = %d, want %d", out.Status, http.StatusInternalServerError)
 	}
 	if out.Data["format"] != prFormatTitleFormat {
 		t.Fatalf("outcome format = %q, want %q", out.Data["format"], prFormatTitleFormat)

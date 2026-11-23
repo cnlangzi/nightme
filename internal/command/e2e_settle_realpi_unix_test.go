@@ -20,6 +20,7 @@ package command_test
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"os/exec"
 	"sync"
@@ -30,7 +31,6 @@ import (
 	pibridge "github.com/cnlangzi/nightme/internal/bridge/pi"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command/queue"
-	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // requireRealPi skips unless the real-pi smoke is opted into and the
@@ -97,7 +97,7 @@ func TestRealPi_SettledWaitsForTheRealTurn(t *testing.T) {
 	h.drive(t, "/queue Reply with exactly one word: pong", "om_settle_realpi")
 
 	got := h.waitSettledFor(t, "om_settle_realpi", 3*time.Minute)
-	if got.Outcome == nil || got.Outcome.Status != messages.OutcomeOK {
+	if got.Outcome == nil || got.Outcome.Status != http.StatusOK {
 		t.Fatalf("settled outcome = %+v, want ok", got.Outcome)
 	}
 

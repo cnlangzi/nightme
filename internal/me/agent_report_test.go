@@ -3,11 +3,12 @@ package me
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/llm"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -120,11 +121,11 @@ jobs:
 	}
 	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound,
 		map[string]string{"id": "42"})
-	r.setJudgment(`the previous step "commit" ended as "incomplete"`)
-	out := wfe.Outcome{
-		Status:  wfe.OutcomeIncomplete,
-		Summary: "the commit did not finish",
-		Data:    map[string]string{"reason": "agent_error"},
+	r.setJudgment(`the previous step "commit" ended with status 500`)
+	out := outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the commit did not finish",
 	}
 	step, ok := r.stepByID("commit")
 	if !ok {
@@ -136,16 +137,14 @@ jobs:
 
 	report := svc.renderSituation(context.Background(), r)
 	for _, want := range []string{
-		"The run needs you: step commit ended as incomplete.",
+		"The run needs you: step commit ended with status 500.",
 		"args: id=42",
 		"round: main, round 1",
 		"directory: /tmp/work",
-		"commit: incomplete",
+		"commit: 500",
 		"push: not run yet",
 		"— ready",
 		"the commit did not finish",
-		"reason: agent_error",
-		"hint: the agent did not run, or it produced no usable output.",
 		"transcripts (tail):",
 		"--- /gtw commit ---",
 		"the coding agent said hello",
@@ -181,7 +180,7 @@ jobs:
 	}
 	r := newRun(svc, Request{Name: "one", ChatID: "obs-2", Cwd: "/tmp/work"}, bound,
 		map[string]string{})
-	r.setJudgment(`the previous step "commit" ended as "failed"`)
+	r.setJudgment(`the previous step "commit" ended with status 500`)
 
 	fix, ok := r.stepByID("fix")
 	if !ok {
@@ -191,26 +190,25 @@ jobs:
 	if !ok {
 		t.Fatal("the workflow has no commit step")
 	}
-	r.recordStep("main", fix, wfe.Outcome{
-		Status:  wfe.OutcomeOK,
-		Summary: "the worktree for branch feat/x is ready",
+	r.recordStep("main", fix, outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the worktree for branch feat/x is ready",
 	})
 	r.setTranscript("/gtw fix", "the agent said it could not find the file")
-	r.recordStep("main", commit, wfe.Outcome{
-		Status:  wfe.OutcomeFailed,
-		Summary: "the worktree has nothing to commit",
-		Data:    map[string]string{"reason": "nothing_to_commit"},
+	r.recordStep("main", commit, outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the worktree has nothing to commit",
 	})
 	r.setTranscript("/gtw commit", "nothing to commit")
 
 	report := svc.renderSituation(context.Background(), r)
 	for _, want := range []string{
-		"fix: ok",
+		"fix: 200",
 		"the worktree for branch feat/x is ready",
-		"commit: failed",
+		"commit: 500",
 		"the worktree has nothing to commit",
-		"reason: nothing_to_commit",
-		"hint: the working tree carries no changes: there was nothing to commit.",
 		"--- /gtw fix ---",
 		"the agent said it could not find the file",
 		"--- /gtw commit ---",
@@ -258,7 +256,7 @@ func TestThePrompt_ANormalResultIsNothingToRepair(t *testing.T) {
 
 	prompt := svc.systemPrompt(r)
 	for _, want := range []string{
-		"An outcome that carries no error is a normal result",
+		"A 2xx is a normal result",
 		"the workflow moves on by itself",
 		"there is nothing there for you to repair",
 	} {
@@ -412,7 +410,7 @@ func TestThePrompt_TeachesTheNewJudgmentPoints(t *testing.T) {
 	prompt := svc.systemPrompt(r)
 	for _, want := range []string{
 		"When a step produced nothing",
-		"An outcome without an error is a normal result",
+		"A 2xx is a normal result",
 		"there is nothing to repair",
 		"verdict nobody reported",
 		"still running in the background",
@@ -420,40 +418,6 @@ func TestThePrompt_TeachesTheNewJudgmentPoints(t *testing.T) {
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("the prompt does not carry %q:\n%s", want, prompt)
-		}
-	}
-}
-
-// TestTheReasonHints_ExplainTheEmptyQueue — the hint of the reason
-// code of an empty queue says what to do about it.
-func TestTheReasonHints_ExplainTheEmptyQueue(t *testing.T) {
-	hint := reasonHint("no_candidate")
-	if hint == "" {
-		t.Fatal("the empty queue has no hint")
-	}
-	for _, want := range []string{"queue", "wait"} {
-		if !strings.Contains(hint, want) {
-			t.Errorf("the hint does not carry %q: %q", want, hint)
-		}
-	}
-}
-
-// TestTheReasonHints_ExplainTheMergeStates — every reason code
-// `/gtw pr view` reports has a hint. A program that branches on the
-// code reads the hint next to it; a code without one leaves the
-// program guessing.
-func TestTheReasonHints_ExplainTheMergeStates(t *testing.T) {
-	for _, code := range []string{
-		"merge_conflict",
-		"pr_behind",
-		"pr_blocked",
-		"state_unknown",
-		"pr_closed",
-		"no_pr",
-		"pr_not_found",
-	} {
-		if reasonHint(code) == "" {
-			t.Errorf("the reason %q has no hint", code)
 		}
 	}
 }
@@ -514,7 +478,7 @@ func TestTheConversation_HoldsNoHints(t *testing.T) {
 		decisionResp("jev-1.14", "/gtw commit", 0.2, 0.8),
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	op.steps = []fakeStep{{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "still going"}}}
 
 	// The chat waits until the test has the run: the run deletes
 	// itself when it ends.
@@ -553,7 +517,7 @@ func TestTheConversation_TheSyntheticCallHasTheNewShape(t *testing.T) {
 		decisionResp("jev-1.14", "/gtw commit", 0.95, 0),
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	op.steps = []fakeStep{{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "still going"}}}
 
 	// The chat waits until the test has the run: the run deletes
 	// itself when it ends.
@@ -606,7 +570,7 @@ func TestTheDecisionModelCannotAnswerWithACommandItWasNotGiven(t *testing.T) {
 		decisionResp("jev-1.14", "/gtw push", 0.99, 0),
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	op.steps = []fakeStep{{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "still going"}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
@@ -716,15 +680,16 @@ jobs:
 `)
 	svc, _ := testService(t, dir, Config{})
 	r := testRun(t, svc, "one")
-	r.setJudgment(`the previous step "commit" ended as "failed"`)
+	r.setJudgment(`the previous step "commit" ended with status 500`)
 
 	commit, ok := r.stepByID("commit")
 	if !ok {
 		t.Fatal("the workflow has no commit step")
 	}
-	r.recordStep("main", commit, wfe.Outcome{
-		Status:  wfe.OutcomeFailed,
-		Summary: "the commit failed",
+	r.recordStep("main", commit, outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the commit failed",
 		Data: map[string]string{
 			"error":  "the working tree has unresolved conflicts",
 			"reason": "conflict",
@@ -756,21 +721,19 @@ jobs:
 `)
 	svc, _ := testService(t, dir, Config{})
 	r := testRun(t, svc, "one")
-	r.setJudgment(`the previous step "commit" ended as "failed"`)
+	r.setJudgment(`the previous step "commit" ended with status 500`)
 
 	// A repair the run issued for the step: the step has not run, so
 	// the run state does not carry the verdict.
-	r.record(wfe.ActionKindCommand, "/gtw push", "commit", wfe.Outcome{
-		Status:  wfe.OutcomeFailed,
-		Summary: "the branch has nothing to push",
-		Data:    map[string]string{"reason": "nothing_to_push"},
+	r.record(wfe.ActionKindCommand, "/gtw push", "commit", outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the branch has nothing to push",
 	})
 
 	report := svc.renderSituation(context.Background(), r)
 	for _, want := range []string{
 		"the branch has nothing to push",
-		"reason: nothing_to_push",
-		"hint: the branch carries no commit the remote does not have: there was nothing to push.",
 	} {
 		if !strings.Contains(report, want) {
 			t.Errorf("the situation does not carry %q:\n%s", want, report)

@@ -1250,9 +1250,9 @@ graceful-fallback-on-network-error 语义(错误路径更曲折)。
 和 `/review` 的续跑状态同款。`HandlerDeps` 把这个 store 递给 dispatcher,
 所以 dispatcher 不需要 manager 本身。
 
-什么时候写:agent 阶段失败时。commit 的两种是 `agent_error`(agent 没跑起来)
-与 `not_committed`(agent 跑了但没提交);pr 的两种是 `agent_error` 与格式门
-失败(`agent_error` + `format` / `attempts`)。git 层的拒绝(冲突、游离 HEAD、
+什么时候写:agent 阶段失败时。commit 的两种是 `500`(agent 没跑起来)
+与 `409`(agent 跑了但没提交);pr 的两种是 `500` 与格式门
+失败(`500` + `format` / `attempts`)。git 层的拒绝(冲突、游离 HEAD、
 工作树干净)不进记录 —— 那些没有"接着干"的活,重打命令就行。
 
 记录里的 `agent` 可能是空的:那次失败就是"没有 agent 可跑"(用户还没 `/use`)。

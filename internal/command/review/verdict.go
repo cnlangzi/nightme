@@ -18,13 +18,14 @@ package review
 
 import (
 	"context"
+	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // verdictGitTimeout bounds the git calls a verdict makes. The
@@ -150,25 +151,28 @@ func (v *selfVerdict) report() {
 // behind: the head moved, or the worktree carries changes that were
 // not there before. A review whose findings were not addressed is an
 // exception.
-func judgeReview(before, after workspaceState, findings int, runner string) messages.Outcome {
-	data := map[string]string{"agent": runner}
+func judgeReview(before, after workspaceState, findings int, runner string) outcome.Outcome {
+	data := map[string]string{KeyAgent: runner}
 	if findings > 0 {
-		data["findings"] = strconv.Itoa(findings)
+		data[KeyFindings] = strconv.Itoa(findings)
 	}
 	if findings == 0 {
-		return messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "the review found nothing to fix",
-			Data:    data,
+		return outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "the review found nothing to fix",
+			Data:       data,
 		}
 	}
 	if after.head != before.head || after.status != before.status {
-		return messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "the review's findings were addressed",
-			Data:    data,
+		return outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "the review's findings were addressed",
+			Data:       data,
 		}
 	}
-	return command.FailedOutcomeData("not_fixed", "the review's findings were not addressed", data,
-		"the review found "+strconv.Itoa(findings)+" finding(s) and the workspace carries neither a new commit nor a new change")
+	return command.FailedOutcomeData(http.StatusConflict,
+		"the review found "+strconv.Itoa(findings)+" finding(s) and the workspace carries neither a new commit nor a new change",
+		data)
 }

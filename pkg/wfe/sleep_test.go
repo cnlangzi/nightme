@@ -2,9 +2,12 @@ package wfe
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // sleepingYAML is a workflow whose job waits between its rounds.
@@ -162,7 +165,7 @@ jobs:
         message: "/fix"
 `)
 	state := newRunState(wf)
-	RecordStep(state, "ship", wf.Jobs["ship"].Steps[0], Outcome{Status: OutcomeOK}, false)
+	RecordStep(state, "ship", wf.Jobs["ship"].Steps[0], outcome.Outcome{Success: true, Status: http.StatusOK}, false)
 	if err := EndRound(state, wf, "ship"); err != nil {
 		t.Fatalf("EndRound: %v", err)
 	}
@@ -319,9 +322,10 @@ func TestDecide_ABrokenStepIsNotOver(t *testing.T) {
 	}
 	runWholeJob(state, wf, "ship")
 	// The last step of the last round broke.
-	state.Steps[len(state.Steps)-1].Outcome = Outcome{
-		Status: OutcomeFailed,
-		Data:   map[string]string{"error": "the worktree could not be created"},
+	state.Steps[len(state.Steps)-1].Outcome = outcome.Outcome{
+		Success: false,
+		Status:  http.StatusInternalServerError,
+		Data:    map[string]string{"error": "the worktree could not be created"},
 	}
 
 	decision, err := Decide(state, wf)

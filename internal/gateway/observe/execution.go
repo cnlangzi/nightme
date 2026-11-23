@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // Phase is the lifecycle stage of one tracked execution.
@@ -95,7 +96,7 @@ type Execution struct {
 
 	// Outcome is the structured verdict. It stays unknown until the
 	// execution settles.
-	Outcome messages.Outcome
+	Outcome outcome.Outcome
 	// Progress is the heartbeat view of the execution.
 	Progress Progress
 	// Transcript holds the text the daemon produced for this
@@ -136,7 +137,7 @@ type execution struct {
 	startedAt time.Time
 	settledAt time.Time
 
-	outcome    messages.Outcome
+	outcome    outcome.Outcome
 	progress   Progress
 	transcript []Entry
 	choices    []messages.Choice

@@ -253,6 +253,12 @@ type AgentSession struct {
 	// override for the in-flight prompt. See WithReplyTo.
 	currentPromptOverrideUserMsgID string
 
+	// promptErr is the failure the in-flight prompt's result
+	// reported. It rides on the prompt when the prompt ends, so the
+	// layer that settles the message knows what the upstream said —
+	// a 429 from the API is a fact, not a line of prose.
+	promptErr error
+
 	// Stall detection state (guarded by asMu). See stall.go.
 	//
 	// stallPromptID names the prompt the current stall episode
@@ -1376,6 +1382,9 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	as.asMu.Lock()
 	as.currentPrompt = p
 	as.currentPromptOverrideUserMsgID = ""
+	// The failure the previous turn reported belongs to that turn:
+	// the new one starts without it.
+	as.promptErr = nil
 	as.asMu.Unlock()
 	as.isReady.Store(false)
 

@@ -9,6 +9,7 @@ package me
 
 import (
 	"context"
+	"net/http"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -568,7 +570,7 @@ func TestTheRoundsTreeCarriesTheFactsOfEveryRound(t *testing.T) {
 			Job:       "main",
 			StartedAt: start,
 			EndedAt:   start.Add(5*time.Minute + 25*time.Second),
-			Outcome:   wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the fix landed"},
+			Outcome:   outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "the fix landed"},
 			Decisions: roundDecisions{System1: 1, Operator: 1},
 			Usage:     llm.Usage{InputTokens: 32400, OutputTokens: 8100},
 		},
@@ -684,24 +686,23 @@ func TestTheRoundsTreeOfAJobThatRepeatsUntilTheRunEnds(t *testing.T) {
 // step share one vocabulary of icons.
 func TestTheIconOfAnOutcome(t *testing.T) {
 	for _, c := range []struct {
-		status wfe.OutcomeStatus
+		status int
 		want   string
 	}{
-		{status: wfe.OutcomeOK, want: "v"},
-		{status: wfe.OutcomeNoop, want: "v"},
-		{status: wfe.OutcomeFailed, want: "!"},
-		{status: wfe.OutcomeIncomplete, want: "!"},
-		{status: wfe.OutcomeTimeout, want: "!"},
-		{status: wfe.OutcomeCancelled, want: "x"},
-		{status: wfe.OutcomeUnknown, want: "?"},
-		{status: "", want: "?"},
+		{status: http.StatusOK, want: "v"},
+		{status: http.StatusNoContent, want: "v"},
+		{status: http.StatusBadRequest, want: "!"},
+		{status: http.StatusInternalServerError, want: "!"},
+		{status: http.StatusRequestTimeout, want: "!"},
+		{status: outcome.StatusClientClosedRequest, want: "x"},
+		{status: 0, want: "?"},
 	} {
 		got := outcomeIcon(c.status)
 		if got != c.want {
-			t.Errorf("the icon of %q is %q, want %q", c.status, got, c.want)
+			t.Errorf("the icon of %d is %q, want %q", c.status, got, c.want)
 		}
 		if n := len([]rune(got)); n != 1 {
-			t.Errorf("the icon of %q is %d characters wide, want one", c.status, n)
+			t.Errorf("the icon of %d is %d characters wide, want one", c.status, n)
 		}
 	}
 }
@@ -730,7 +731,7 @@ func TestTheRoundsTreeFoldsTheOldRounds(t *testing.T) {
 			Job:       "main",
 			StartedAt: start.Add(time.Duration(i) * time.Minute),
 			EndedAt:   start.Add(time.Duration(i)*time.Minute + time.Second),
-			Outcome:   wfe.Outcome{Status: wfe.OutcomeOK},
+			Outcome:   outcome.Outcome{Status: http.StatusOK},
 		})
 	}
 
@@ -773,14 +774,14 @@ func TestTheRoundsTreeKeepsTheIconsInOneColumn(t *testing.T) {
 			Job:       "main",
 			StartedAt: start,
 			EndedAt:   start.Add(time.Minute),
-			Outcome:   wfe.Outcome{Status: wfe.OutcomeOK},
+			Outcome:   outcome.Outcome{Status: http.StatusOK},
 		},
 		{
 			Round:     10,
 			Job:       "main",
 			StartedAt: start.Add(time.Minute),
 			EndedAt:   start.Add(2 * time.Minute),
-			Outcome:   wfe.Outcome{Status: wfe.OutcomeFailed},
+			Outcome:   outcome.Outcome{Status: http.StatusInternalServerError},
 		},
 	}
 
@@ -819,7 +820,7 @@ func TestTheRoundThatFailedSaysSo(t *testing.T) {
 		Job:       "main",
 		StartedAt: start,
 		EndedAt:   start.Add(time.Second),
-		Outcome:   wfe.Outcome{Status: wfe.OutcomeFailed, Summary: "the remote refused"},
+		Outcome:   outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "the remote refused"},
 	}}
 
 	tree := r.roundsTree(iteration{job: "main", round: 2})
@@ -855,7 +856,7 @@ func TestTheClosingBlockOfARoundCarriesItsNumbers(t *testing.T) {
 		Job:       "main",
 		StartedAt: start,
 		EndedAt:   start.Add(5*time.Minute + 14*time.Second),
-		Outcome:   wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the fix landed"},
+		Outcome:   outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "the fix landed"},
 		Decisions: roundDecisions{System1: 1, Operator: 1},
 		Usage:     llm.Usage{InputTokens: 32400, OutputTokens: 8100},
 	}
@@ -868,7 +869,7 @@ func TestTheClosingBlockOfARoundCarriesItsNumbers(t *testing.T) {
 		t.Errorf("the decisions line is %q, want %q", got, want)
 	}
 	// A round in which nothing was decided says so.
-	empty := roundRecord{Outcome: wfe.Outcome{Status: wfe.OutcomeOK}}
+	empty := roundRecord{Outcome: outcome.Outcome{Status: http.StatusOK}}
 	if got := decisionsText(empty); !strings.HasPrefix(got, "decisions:  none") {
 		t.Errorf("the decisions line is %q, want it to say none", got)
 	}
@@ -892,14 +893,14 @@ func TestTheRoundCardGivesEveryStepItsOwnState(t *testing.T) {
 	r := newRun(svc, Request{Name: "three", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
 	t.Cleanup(r.cancel)
 	r.state.Steps = []wfe.StepState{
-		{ID: "commit", Job: "main", Round: 1, Outcome: wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the commit landed"}},
-		{ID: "push", Job: "main", Round: 1, Outcome: wfe.Outcome{
-			Status:  wfe.OutcomeFailed,
-			Summary: "the remote refused",
-			Data:    map[string]string{wfe.OutcomeKeyError: "no_remote"},
+		{ID: "commit", Job: "main", Round: 1, Outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "the commit landed"}},
+		{ID: "push", Job: "main", Round: 1, Outcome: outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "the remote refused",
 		}},
 		// The record of another round is not the state of this round.
-		{ID: "pr", Job: "main", Round: 2, Outcome: wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the PR is up"}},
+		{ID: "pr", Job: "main", Round: 2, Outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "the PR is up"}},
 	}
 
 	items := r.roundTasks("main", 1)
@@ -915,7 +916,7 @@ func TestTheRoundCardGivesEveryStepItsOwnState(t *testing.T) {
 	if items[1].Status != agent.TaskFailed {
 		t.Errorf("the step that failed is %q, want it failed", items[1].Status)
 	}
-	for _, want := range []string{"the remote refused", "no_remote"} {
+	for _, want := range []string{"the remote refused"} {
 		if !strings.Contains(items[1].ActiveForm, want) {
 			t.Errorf("the detail of the step that failed is %q, want it to name %q", items[1].ActiveForm, want)
 		}
@@ -945,7 +946,7 @@ func TestTheDetailOfAStepIsCutShort(t *testing.T) {
 	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
 	t.Cleanup(r.cancel)
 	r.state.Steps = []wfe.StepState{
-		{ID: "commit", Job: "main", Outcome: wfe.Outcome{Status: wfe.OutcomeFailed, Summary: strings.Repeat("x", 4000)}},
+		{ID: "commit", Job: "main", Outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: strings.Repeat("x", 4000)}},
 	}
 
 	items := r.roundTasks("main", 1)
@@ -1055,15 +1056,17 @@ func TestTheDetailOfAStepDropsTheBranch(t *testing.T) {
 	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
 	t.Cleanup(r.cancel)
 	r.state.Steps = []wfe.StepState{
-		{ID: "commit", Job: "main", Outcome: wfe.Outcome{
-			Status:  wfe.OutcomeOK,
-			Summary: "the agent produced 12 change(s) on 12-fix-client-refuse",
-			Data:    map[string]string{outcomeKeyBranch: "12-fix-client-refuse"},
+		{ID: "commit", Job: "main", Outcome: outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "the agent produced 12 change(s) on 12-fix-client-refuse",
+			Data:       map[string]string{outcomeKeyBranch: "12-fix-client-refuse"},
 		}},
-		{ID: "push", Job: "main", Outcome: wfe.Outcome{
-			Status:  wfe.OutcomeOK,
-			Summary: "the work landed on 12-fix-client-refuse already",
-			Data:    map[string]string{outcomeKeyBranch: "12-fix-client-refuse"},
+		{ID: "push", Job: "main", Outcome: outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "the work landed on 12-fix-client-refuse already",
+			Data:       map[string]string{outcomeKeyBranch: "12-fix-client-refuse"},
 		}},
 	}
 
@@ -1093,10 +1096,11 @@ func TestTheDetailOfAStepKeepsABranchItDoesNotEndWith(t *testing.T) {
 	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
 	t.Cleanup(r.cancel)
 	r.state.Steps = []wfe.StepState{
-		{ID: "commit", Job: "main", Outcome: wfe.Outcome{
-			Status:  wfe.OutcomeOK,
-			Summary: "the work landed on 12-fix-client-refuse already",
-			Data:    map[string]string{outcomeKeyBranch: "12-fix-client-refuse"},
+		{ID: "commit", Job: "main", Outcome: outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "the work landed on 12-fix-client-refuse already",
+			Data:       map[string]string{outcomeKeyBranch: "12-fix-client-refuse"},
 		}},
 	}
 
@@ -1128,10 +1132,11 @@ func TestTheDetailOfAStepIsCutShortAfterTheBranchIsDropped(t *testing.T) {
 	t.Cleanup(r.cancel)
 	branch := "12-fix-client-refuse"
 	r.state.Steps = []wfe.StepState{
-		{ID: "commit", Job: "main", Outcome: wfe.Outcome{
-			Status:  wfe.OutcomeFailed,
-			Summary: strings.Repeat("x", 4000) + " on " + branch,
-			Data:    map[string]string{outcomeKeyBranch: branch},
+		{ID: "commit", Job: "main", Outcome: outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: strings.Repeat("x", 4000) + " on " + branch,
+			Data:       map[string]string{outcomeKeyBranch: branch},
 		}},
 	}
 
@@ -1276,8 +1281,8 @@ func TestTheTreeNamesTheJobOfARound(t *testing.T) {
 
 	start := time.Date(2026, 11, 18, 10, 33, 4, 0, time.UTC)
 	r.roundRecords = []roundRecord{
-		{Round: 1, Job: "ship", StartedAt: start, EndedAt: start.Add(time.Minute), Outcome: wfe.Outcome{Status: wfe.OutcomeOK}},
-		{Round: 1, Job: "verify", StartedAt: start.Add(time.Minute), EndedAt: start.Add(2 * time.Minute), Outcome: wfe.Outcome{Status: wfe.OutcomeOK}},
+		{Round: 1, Job: "ship", StartedAt: start, EndedAt: start.Add(time.Minute), Outcome: outcome.Outcome{Status: http.StatusOK}},
+		{Round: 1, Job: "verify", StartedAt: start.Add(time.Minute), EndedAt: start.Add(2 * time.Minute), Outcome: outcome.Outcome{Status: http.StatusOK}},
 	}
 
 	tree := r.roundsTree(iteration{job: "ship", round: 2})
@@ -1310,7 +1315,7 @@ func TestTheRoundThatEndsIsRecorded(t *testing.T) {
 		Kind:    wfe.ActionKindRun,
 		StepID:  "commit",
 		Round:   1,
-		Outcome: wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the commit landed"},
+		Outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "the commit landed"},
 		At:      at,
 	}}
 	r.system1Decisions = 1
@@ -1333,8 +1338,8 @@ func TestTheRoundThatEndsIsRecorded(t *testing.T) {
 	if len(r.roundRecords) != 1 || r.roundRecords[0].Round != 1 {
 		t.Errorf("the run holds %+v, want the record of the round", r.roundRecords)
 	}
-	if rec.Outcome.Summary != "the commit landed" {
-		t.Errorf("the record carries %q, want what the round came to", rec.Outcome.Summary)
+	if rec.Outcome.StatusText != "the commit landed" {
+		t.Errorf("the record carries %q, want what the round came to", rec.Outcome.StatusText)
 	}
 }
 
@@ -1363,7 +1368,7 @@ func TestTheTreeOfTheRoundsReadsTheRecordsOfTheRun(t *testing.T) {
 			Job:       "main",
 			StartedAt: start,
 			EndedAt:   start.Add(time.Minute),
-			Outcome:   wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the fix landed"},
+			Outcome:   outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "the fix landed"},
 			Decisions: roundDecisions{System1: 1},
 			Usage:     llm.Usage{InputTokens: 100, OutputTokens: 20},
 		},
@@ -1372,7 +1377,7 @@ func TestTheTreeOfTheRoundsReadsTheRecordsOfTheRun(t *testing.T) {
 			Job:       "main",
 			StartedAt: start.Add(time.Minute),
 			EndedAt:   start.Add(2 * time.Minute),
-			Outcome:   wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the fix landed again"},
+			Outcome:   outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "the fix landed again"},
 			Decisions: roundDecisions{System1: 1, Operator: 1},
 			Usage:     llm.Usage{InputTokens: 200, OutputTokens: 40},
 		},

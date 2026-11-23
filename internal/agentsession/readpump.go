@@ -187,6 +187,19 @@ func (as *AgentSession) readpumpLoop(stop <-chan struct{}, done chan struct{}) {
 				return
 			}
 
+			// The failure the turn reported rides on the prompt: the
+			// layer that settles the message needs to know what the
+			// upstream said — a 429 from the API is a fact, not a
+			// line of prose.
+			//
+			// A result frame carries the failure of a turn that
+			// ended badly; an error frame carries the failure of a
+			// turn that died. A tool frame's failure belongs to the
+			// tool, not to the turn.
+			if (ev.Kind == agent.EventAgentResult || ev.Kind == agent.EventAgentError) && ev.Err != nil {
+				as.rememberPromptErr(ev.Err)
+			}
+
 			// Terminal handling: EventAgentDone / EventAgentError ends the
 			// in-flight Prompt. The PromptEnded event is emitted
 			// by endPrompt itself.
@@ -229,6 +242,24 @@ func (as *AgentSession) emitLifecycleLocked(status Status) {
 	}
 }
 
+// rememberPromptErr keeps the failure the turn reported.
+//
+// The error belongs to the prompt that is running: the readpump
+// reads it back when the prompt ends. A failure that arrives when no
+// prompt is in flight belongs to no turn — the turn it came from is
+// over — and is dropped.
+func (as *AgentSession) rememberPromptErr(err error) {
+	if as == nil || err == nil {
+		return
+	}
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
+	if as.currentPrompt == nil {
+		return
+	}
+	as.promptErr = err
+}
+
 // endPrompt (CS-AS 边界重构 Phase 1) is the AS-internal Prompt
 // terminator. Called by:
 //
@@ -258,6 +289,7 @@ func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 	if p != nil {
 		p.EndedAt = now
 		p.EndReason = reason
+		p.Err = as.promptErr
 		if userMsgID == "" {
 			userMsgID = p.LastMessageID
 		} else {
@@ -271,6 +303,7 @@ func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 			LastMessageID:  userMsgID,
 			EndedAt:        now,
 			EndReason:      reason,
+			Err:            as.promptErr,
 		}
 	}
 	slog.Info("agentsession: endPrompt", "as_id", as.ID, "prompt_id", p.ID, "user_msg_id", userMsgID, "reason", reason.String())
@@ -284,6 +317,7 @@ func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 	// on the prompt-done path; either suffices on its own but
 	// having both keeps the invariant local to either call site).
 	as.currentPromptOverrideUserMsgID = ""
+	as.promptErr = nil
 	as.isReady.Store(true)
 	stop := as.readpumpStop
 	as.asMu.Unlock()

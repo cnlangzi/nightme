@@ -8,12 +8,14 @@ package gtw
 import (
 	"context"
 	"errors"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // seedPR seeds the pull request the branch opened, together with
@@ -28,7 +30,7 @@ func seedPR(t *testing.T, prov *fakeGitProvider, head string, number int, labels
 
 // settledOutcomeOfClose returns the outcome the close settled with,
 // read from the rig's recorder.
-func settledOutcomeOfClose(t *testing.T, rec *closeTestRecCh) *messages.Outcome {
+func settledOutcomeOfClose(t *testing.T, rec *closeTestRecCh) *outcome.Outcome {
 	t.Helper()
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
@@ -184,8 +186,8 @@ func TestRunClose_PRFinalizeFailureWarnsButDoesNotAbort(t *testing.T) {
 	if got == nil {
 		t.Fatal("no settled outcome")
 	}
-	if got.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %s, want ok — the local cleanup ran", got.Status)
+	if got.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want ok — the local cleanup ran", got.Status)
 	}
 }
 

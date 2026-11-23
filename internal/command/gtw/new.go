@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"os"
 	"regexp"
 	"slices"
@@ -15,9 +16,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/nightmedir"
 	"github.com/cnlangzi/nightme/internal/pathutil"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // issueDraftDirName is the per-user directory under
@@ -136,7 +137,7 @@ func RunNewDraft(
 	if messageID == "" {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ internal: missing message id; /gtw new did not enqueue",
-			command.FailedOutcome("error", "the draft request could not be queued")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the draft request could not be queued")), nil
 	}
 	cwd := cs.SelectedCwd()
 
@@ -147,26 +148,26 @@ func RunNewDraft(
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
-			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository")), nil
+			command.FailedOutcome(http.StatusBadRequest, "the workspace is not inside a git repository")), nil
 	}
 	// The provider's CLI runs in the workspace's own directory —
 	// the same one the context names, so the two cannot drift.
 	providerCtx := Context{RepoRoot: repoRoot, Worktree: cwd}
 	if _, _, _, err := resolveProvider(ctx, providerCtx, deps, providerCtx.Worktree); err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, "❌ "+err.Error(),
-			command.FailedOutcome("provider_error", "the git host could not be resolved")), nil
+			command.FailedOutcome(http.StatusServiceUnavailable, "the git host could not be resolved")), nil
 	}
 
 	draftDir, err := issueDraftDir(chatID)
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ prepare issue drafts: %v", err),
-			command.FailedOutcome("error", "the draft directory could not be prepared")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the draft directory could not be prepared")), nil
 	}
 	if err := resetIssueDrafts(draftDir); err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ prepare issue drafts: %v", err),
-			command.FailedOutcome("error", "the draft directory could not be prepared")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the draft directory could not be prepared")), nil
 	}
 
 	// Arm the draft watcher as the last step before the dispatch:
@@ -181,14 +182,15 @@ func RunNewDraft(
 	if err := dispatchIssueToChatSession(ctx, cs, deps.Now, chatID, messageID, blocks); err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ dispatch to agent: %v\nhint: /gtw new archives the discussion held with the current agent", err),
-			command.FailedOutcome("error", "the draft request did not reach the agent")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the draft request did not reach the agent")), nil
 	}
 	// The prompt is queued — the agent's own turn verdict merges
 	// into this outcome when the turn ends.
-	reportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: "the agent was asked to draft the issues",
-		Data:    map[string]string{"repo_root": repoRoot},
+	reportOutcome(ctx, outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the agent was asked to draft the issues",
+		Data:       map[string]string{KeyRepoRoot: repoRoot},
 	})
 	return &Result{Consumed: true}, nil
 }
@@ -208,14 +210,14 @@ func RunNewCreate(
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ locate issue drafts: %v", err),
-			command.FailedOutcome("error", "the draft directory could not be located")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the draft directory could not be located")), nil
 	}
 	cwd := cs.SelectedCwd()
 	repoRoot, err := RepoRoot(ctx, cwd, deps.Git)
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
-			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository")), nil
+			command.FailedOutcome(http.StatusBadRequest, "the workspace is not inside a git repository")), nil
 	}
 	// The label catalog is verified before the issues are created,
 	// so the repository keeps the gtw labels /gtw fix needs. A
@@ -269,34 +271,34 @@ type issueDraftSet struct {
 // Every draft that references another draft states a dependency, so
 // the run also writes the platform's own relations: the referenced
 // issue blocks the referencing one.
-func createIssuesFromDrafts(ctx context.Context, dir string, resolve func() (GitProvider, string, string, error)) (string, messages.Outcome) {
+func createIssuesFromDrafts(ctx context.Context, dir string, resolve func() (GitProvider, string, string, error)) (string, outcome.Outcome) {
 	set, err := loadIssueDrafts(dir)
 	if err != nil {
 		return fmt.Sprintf("❌ read issue drafts %s: %v", dir, err),
-			command.FailedOutcome("error", "the issue drafts could not be read")
+			command.FailedOutcome(http.StatusInternalServerError, "the issue drafts could not be read")
 	}
 	if len(set.pending) == 0 {
 		if len(set.created) > 0 {
 			return "✨ every issue draft of this chat is already an issue\n" +
 					"→ issues: " + joinIssueNumbers(set.created) + "\n" +
 					"↳ `/gtw new` to draft from a new discussion",
-				command.NoopOutcome("every issue draft is already an issue",
-					map[string]string{"issues": joinIssueNumbers(set.created)})
+				command.SuccessOutcome("every issue draft is already an issue",
+					map[string]string{KeyIssues: joinIssueNumbers(set.created)})
 		}
 		return "❌ no issue draft for this chat\n" +
 				"→ drafts: " + dir + "\n" +
 				"↳ if the agent showed drafts in chat, ask it to write them into that directory · otherwise run `/gtw new`",
-			command.FailedOutcome("no_drafts", "the chat has no issue draft")
+			command.FailedOutcome(http.StatusNotFound, "the chat has no issue draft")
 	}
 	if err := validateIssueDrafts(set); err != nil {
 		return fmt.Sprintf("❌ invalid issue draft %v\n→ drafts: %s\n↳ ask the agent to fix the draft, then `/gtw new -y` again", err, dir),
-			command.FailedOutcome("invalid_draft", "an issue draft is not usable")
+			command.FailedOutcome(http.StatusBadRequest, "an issue draft is not usable")
 	}
 
 	provider, owner, repo, err := resolve()
 	if err != nil {
 		return "❌ " + err.Error(),
-			command.FailedOutcome("provider_error", "the git host could not be resolved")
+			command.FailedOutcome(http.StatusServiceUnavailable, "the git host could not be resolved")
 	}
 
 	numbers := maps.Clone(set.created)
@@ -339,34 +341,36 @@ func createIssuesFromDrafts(ctx context.Context, dir string, resolve func() (Git
 // success (the ⚠️ card), whatever the remaining draft count says:
 // the count alone cannot tell "the run stopped" from "the run
 // finished".
-func issueCreateOutcome(opened []*Issue, owner, repo string, kept int, runErr error, deps issueDeps) messages.Outcome {
+func issueCreateOutcome(opened []*Issue, owner, repo string, kept int, runErr error, deps issueDeps) outcome.Outcome {
 	numbers := make([]string, 0, len(opened))
 	for _, issue := range opened {
 		numbers = append(numbers, fmt.Sprintf("%d", issue.ID))
 	}
-	data := map[string]string{"repo": owner + "/" + repo}
+	data := map[string]string{KeyRepo: owner + "/" + repo}
 	if len(numbers) > 0 {
-		data["issues"] = strings.Join(numbers, ",")
+		data[KeyIssues] = strings.Join(numbers, ",")
 	}
 	if kept > 0 {
-		data["kept"] = fmt.Sprintf("%d", kept)
+		data[KeyKept] = fmt.Sprintf("%d", kept)
 	}
-	data["deps"] = fmt.Sprintf("%d", len(deps.created))
-	data["deps_failed"] = fmt.Sprintf("%d", len(deps.failures))
+	data[KeyDeps] = fmt.Sprintf("%d", len(deps.created))
+	data[KeyDepsFailed] = fmt.Sprintf("%d", len(deps.failures))
 	switch {
 	case runErr != nil && len(opened) == 0:
-		return command.FailedOutcomeData("error", "no issue could be created", data)
+		return command.FailedOutcomeData(http.StatusInternalServerError, "no issue could be created", data)
 	case runErr != nil:
-		return messages.Outcome{
-			Status:  messages.OutcomeIncomplete,
-			Summary: fmt.Sprintf("%d issue(s) opened before the run stopped", len(opened)),
-			Data:    data,
+		return outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: fmt.Sprintf("%d issue(s) opened before the run stopped", len(opened)),
+			Data:       data,
 		}
 	default:
-		return messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: fmt.Sprintf("opened %d issue(s)", len(opened)),
-			Data:    data,
+		return outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: fmt.Sprintf("opened %d issue(s)", len(opened)),
+			Data:       data,
 		}
 	}
 }

@@ -28,7 +28,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/thinktext"
-	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // maxEventLine is how much of an argument line the chat sees. The
@@ -162,10 +161,10 @@ func (s *Service) publishToolEnd(ctx context.Context, r *run, sess *session, cal
 	switch {
 	case cause != nil:
 		tool.Err = cause
-	case outcomeFailed(res.Status):
-		tool.Err = errors.New(res.Summary)
+	case outcomeFailed(res):
+		tool.Err = errors.New(failureText(res))
 	default:
-		tool.Summary = res.Summary
+		tool.Summary = res.StatusText
 	}
 	s.emit(ctx, r, sess, messages.OutboundMessage{
 		Kind: messages.OutToolEnd,
@@ -173,16 +172,28 @@ func (s *Service) publishToolEnd(ctx context.Context, r *run, sess *session, cal
 	})
 }
 
+// failureText is the line a failed call carries.
+//
+// A failure always says something: an outcome that carries a status
+// but no words would render as an empty error.
+func failureText(res stepResult) string {
+	if res.StatusText != "" {
+		return res.StatusText
+	}
+	return "the command failed"
+}
+
 // outcomeFailed reports whether a tool result is a failure.
 //
 // The verdict of a call that did not go through is an error, not a
-// summary: the chat renders the two differently.
-func outcomeFailed(status string) bool {
-	switch status {
-	case string(wfe.OutcomeFailed), string(wfe.OutcomeCancelled), string(wfe.OutcomeTimeout), "error":
-		return true
+// summary: the chat renders the two differently. A command that
+// reported no verdict at all is not a failure — nobody said anything
+// about it.
+func outcomeFailed(res stepResult) bool {
+	if res.phase != phaseSettled || res.Status == 0 {
+		return false
 	}
-	return false
+	return !res.Success
 }
 
 // toolArgLine renders the one-line summary of a tool call's

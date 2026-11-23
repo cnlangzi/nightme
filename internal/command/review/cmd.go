@@ -64,6 +64,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"runtime"
 	"strings"
 	"sync"
@@ -76,6 +77,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/gitbase"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // Factory is the command.SlashCommandFactory for /review.
@@ -361,11 +363,11 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// parser can recognize `--agent`.
 	spec, err := parseReviewArgs(input.Args[1:])
 	if err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	if err := validateReviewFlags(spec); err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the flag combination is not valid"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the flag combination is not valid"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
@@ -381,31 +383,32 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	if err != nil {
 		// An agent name that is not registered is a different
 		// failure than a failed write — the program branches on it.
-		reason := "config_error"
+		status := http.StatusBadRequest
 		summary := "the review agent could not be persisted"
 		if errors.Is(err, errUnknownReviewAgent) {
-			reason = "unknown_agent"
+			status = http.StatusNotFound
 			summary = "the review agent is not a registered agent"
 		}
-		chatsession.ReportOutcome(ctx, command.FailedOutcome(reason, summary))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(status, summary))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	if writeFailed {
 		// The review still runs, but persisting the runner did
 		// not happen — half of what was asked. The review's own
 		// verdict merges underneath this one.
-		chatsession.ReportOutcome(ctx, messages.Outcome{
-			Status:  messages.OutcomeIncomplete,
-			Summary: "the review agent could not be persisted",
-			Data:    map[string]string{"reason": "config_write_failed"},
+		chatsession.ReportOutcome(ctx, outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "the review agent could not be persisted",
 		})
 	}
 	if done {
 		// --unset: the persisted runner is gone and no review runs.
-		chatsession.ReportOutcome(ctx, messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "the global review agent was removed",
-			Data:    map[string]string{"scope": "global"},
+		chatsession.ReportOutcome(ctx, outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "the global review agent was removed",
+			Data:       map[string]string{KeyScope: "global"},
 		})
 		return command.Reply(ctx, rt, strings.Join(notices, "\n")), nil
 	}
@@ -466,17 +469,17 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 	if err != nil {
 		switch {
 		case errors.Is(err, chatsession.ErrNoSelectedCwd):
-			chatsession.ReportOutcome(ctx, command.FailedOutcome("no_cwd", "no workspace is set"))
+			chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "no workspace is set"))
 			return replyWith(ctx, rt, notices,
 				"❌ no workspace set. Send /cwd <path> first.",
 			), nil
 		case errors.Is(err, chatsession.ErrNoSelectedAgent):
-			chatsession.ReportOutcome(ctx, command.FailedOutcome("no_agent", "no agent is selected"))
+			chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "no agent is selected"))
 			return replyWith(ctx, rt, notices,
 				"❌ no active agent configured. Run /use <agent> first.",
 			), nil
 		default:
-			chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the agent could not be activated"))
+			chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the agent could not be activated"))
 			return replyWith(ctx, rt, notices, fmt.Sprintf(
 				"❌ failed to activate agent: %v", err,
 			)), nil
@@ -508,7 +511,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		notices = append(notices, warn)
 	}
 	if runnerName == "" {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("no_agent", "no agent is selected"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "no agent is selected"))
 		return replyWith(ctx, rt, notices,
 			"❌ no active agent configured. Run /use <agent> first.",
 		), nil
@@ -523,9 +526,9 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		if spec.Agent != "" {
 			suffix = " (--agent)"
 		}
-		chatsession.ReportOutcome(ctx, command.FailedOutcomeData("unknown_agent",
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(http.StatusNotFound,
 			"the review runner is not a registered agent",
-			map[string]string{"agent": runnerName}))
+			map[string]string{KeyAgent: runnerName}))
 		return replyWith(ctx, rt, notices, fmt.Sprintf(
 			"❌ unknown agent %q%s", runnerName, suffix,
 		)), nil
@@ -731,7 +734,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			// unknown base, an agent that cannot review — so there is
 			// no group and no work to pick up: the outcome carries no
 			// unfinished count.
-			data := unfinishedData(map[string]string{"agent": runnerName, "delivered": "false"}, groupOutcomes)
+			data := unfinishedData(map[string]string{KeyAgent: runnerName, BoolKeyDelivered: "false"}, groupOutcomes)
 			switch {
 			case errors.Is(err, agent.ErrNoDiff):
 				// Pre-compute found zero reviewable files in the
@@ -752,9 +755,9 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 				slog.Default().Info("/review: empty diff, no agent spawn",
 					"agent", runnerName,
 					"workspace", workspace)
-				work.Report(command.FailedOutcomeData("no_diff", "no diff to review",
-					data,
-					"there is no diff to review: the working tree is clean and the branch carries no change against the base"))
+				work.Report(command.FailedOutcomeData(http.StatusNotFound,
+					"there is no diff to review: the working tree is clean and the branch carries no change against the base",
+					data))
 			case errors.Is(err, agent.ErrBaseUnknown):
 				// The repository has an origin remote, but the base
 				// branch could neither be read nor repaired — so the
@@ -767,20 +770,18 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 					"workspace", workspace,
 					"err", err,
 				)
-				work.Report(command.FailedOutcomeData("base_unknown",
-					"the base branch could not be determined",
-					data,
-					"the base branch could neither be read nor repaired: the committed diff was not reviewed"))
+				work.Report(command.FailedOutcomeData(http.StatusInternalServerError,
+					"the base branch could neither be read nor repaired: the committed diff was not reviewed",
+					data))
 			case errors.Is(err, agent.ErrReviewNotSupported):
 				slog.Default().Warn("/review failed",
 					"agent", runnerName,
 					"err", err,
 				)
 				text = fmt.Sprintf("❌ agent %q does not support /review", runnerName)
-				work.Report(command.FailedOutcomeData("not_supported",
-					"the agent does not support /review",
-					data,
-					"the agent cannot review: "+err.Error()))
+				work.Report(command.FailedOutcomeData(http.StatusNotImplemented,
+					"the agent cannot review: "+err.Error(),
+					data))
 			default:
 				slog.Default().Warn("/review failed",
 					"agent", runnerName,
@@ -791,9 +792,9 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 					msg = msg[:800] + "…(truncated)"
 				}
 				text = fmt.Sprintf("❌ /review failed (agent=%s):\n%s", runnerName, msg)
-				work.Report(command.FailedOutcomeData("error", err.Error(),
-					timeoutOutcomeData(data, groupOutcomes),
-					"the review failed: "+err.Error()))
+				work.Report(command.FailedOutcomeData(http.StatusInternalServerError,
+					"the review failed: "+err.Error(),
+					timeoutOutcomeData(data, groupOutcomes)))
 			}
 			if emitter == nil {
 				return
@@ -812,10 +813,11 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			// The review the chat is in the middle of keeps its
 			// findings, and they wait for the round that completes
 			// it.
-			work.Report(messages.Outcome{
-				Status:  messages.OutcomeOK,
-				Summary: "the review found nothing to review",
-				Data:    map[string]string{"agent": runnerName, "delivered": "false"},
+			work.Report(outcome.Outcome{
+				Success:    true,
+				Status:     http.StatusOK,
+				StatusText: "the review found nothing to review",
+				Data:       map[string]string{KeyAgent: runnerName, BoolKeyDelivered: "false"},
 			})
 			return
 		}
@@ -842,9 +844,9 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// The card's digest carries only the locations, so the
 		// agent's answer is where the findings' text reaches the
 		// reader when /think keeps the thread empty.
-		data := map[string]string{"agent": runnerName}
+		data := map[string]string{KeyAgent: runnerName}
 		if groups := len(rec.outcomes); groups > 0 {
-			data["groups"] = fmt.Sprintf("%d", groups)
+			data[KeyGroups] = fmt.Sprintf("%d", groups)
 		}
 		f.deliver(reviewDelivery{
 			ctx:        revCtx,
@@ -911,7 +913,7 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 
 	rec, ok := f.lookup(chatID)
 	if !ok {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("no_review", "this chat has no review to continue"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusNotFound, "this chat has no review to continue"))
 		return replyWith(ctx, rt, notices,
 			"❌ no review to continue — run /review first",
 		), nil
@@ -920,7 +922,7 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 	// concurrent --continue commands must not both resume the same
 	// group sessions. The check and the mark happen under one lock.
 	if !f.startContinuation(chatID) {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("already_running",
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusConflict,
 			"a review is already running in this chat"))
 		return replyWith(ctx, rt, notices,
 			"❌ a review is already running in this chat",
@@ -945,16 +947,16 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		release()
 		// The ℹ️ cards here mean "there was nothing to resume" —
 		// the last review finished, or its one retry is spent.
-		chatsession.ReportOutcome(ctx, command.NoopOutcome("there was nothing to resume", nil))
+		chatsession.ReportOutcome(ctx, command.SuccessOutcome("there was nothing to resume", nil))
 		return replyWith(ctx, rt, notices, why), nil
 	}
 
 	starter, err := agent.Builtins.Get(runnerName)
 	if err != nil {
 		release()
-		chatsession.ReportOutcome(ctx, command.FailedOutcomeData("unknown_agent",
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(http.StatusNotFound,
 			"the review runner is not a registered agent",
-			map[string]string{"agent": runnerName}))
+			map[string]string{KeyAgent: runnerName}))
 		return replyWith(ctx, rt, notices, fmt.Sprintf(
 			"❌ unknown agent %q", runnerName,
 		)), nil
@@ -968,17 +970,17 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		release()
 		switch {
 		case errors.Is(err, chatsession.ErrNoSelectedCwd):
-			chatsession.ReportOutcome(ctx, command.FailedOutcome("no_cwd", "no workspace is set"))
+			chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "no workspace is set"))
 			return replyWith(ctx, rt, notices,
 				"❌ no workspace set. Send /cwd <path> first.",
 			), nil
 		case errors.Is(err, chatsession.ErrNoSelectedAgent):
-			chatsession.ReportOutcome(ctx, command.FailedOutcome("no_agent", "no agent is selected"))
+			chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "no agent is selected"))
 			return replyWith(ctx, rt, notices,
 				"❌ no active agent configured. Run /use <agent> first.",
 			), nil
 		default:
-			chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the agent could not be activated"))
+			chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the agent could not be activated"))
 			return replyWith(ctx, rt, notices, fmt.Sprintf(
 				"❌ failed to activate agent: %v", err,
 			)), nil
@@ -1156,9 +1158,9 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// over every group of the review it continues — so its count
 		// goes under `continued_groups`.
 		continued, _ := groupCounts(groupOutcomes)
-		data := map[string]string{"agent": runnerName}
+		data := map[string]string{KeyAgent: runnerName}
 		if continued > 0 {
-			data["continued_groups"] = fmt.Sprintf("%d", continued)
+			data[KeyContinuedGroups] = fmt.Sprintf("%d", continued)
 		}
 		f.deliver(reviewDelivery{
 			ctx:        revCtx,

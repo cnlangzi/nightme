@@ -41,29 +41,33 @@ type OutboundMessage struct {
 
 ```go
 type Outcome struct {
-	Status  OutcomeStatus    // 机器可读的判定
-	Summary string            // 一行人类可读的复述
-	Data    map[string]string // 机器可读的事实（命令各自定义）
+    Success    bool              // 这次工作成了没有
+    Status     int               // HTTP 状态码
+    StatusText string            // 一行人类可读的复述
+    Data       map[string]string // 机器可读的事实（命令各自定义）
 }
 ```
+
+`Status` 是 HTTP 状态码。`2xx` 是正常分支（活干完了，或者没东西可干），`4xx` 与 `5xx` 是异常。`Status` 为 0 表示这次工作没有 HTTP 状态，这时 `Success` 由产出方自己说。
+
+`StatusText` 是唯一的一行人话：命令做成了什么、或者什么坏了，都在这里。`Data` 是事实，不是分类码。
 
 `Data` 的键由产生它的命令定义。当前在用的键：
 
 | 键 | 含义 |
 | --- | --- |
-| `end_reason` | 回合结束原因（`clean` / `user-stopped` / `user-killed` / …） |
-| `reason` | 结束原因分类（见 §7.1）——命令**因为有东西要做**才跑、又发现没东西可做时，它报 `failed` 并带上这里的码 |
-| `error` | 出错说明——坏了的时候，这里是一句人话；没有这个键说明不是坏了，只是没东西可做（见 §2） |
 | `agent` | 跑这件事的 agent 名 |
 | `issue` | `/gtw fix` 处理的 issue 号（本地模式为 `-1`）；`/gtw assign` 处理的是被贴 / 摘队列标记的 issue 号 |
+| `issue_url` | issue 在平台上的链接（`/gtw assign` 给出被改动的那个 issue） |
 | `branch` | 分支名 |
 | `worktree` | worktree 路径 |
 | `repo_root` | 主仓库根目录 |
 | `mode` | `/gtw fix` 的模式（`remote` / `local`） |
 | `selected_by` | issue 是怎么选出来的（`auto` = `/gtw fix *` 自己挑的） |
 | `wake_after` | 队列里没有可选项时，个人 agent 多久之后再来（`"5m"`） |
-| `label` | 挡住这次 fix 的 issue 状态 label（`nightme/wip` / `nightme/ready` / …）——`/gtw fix` 拒绝一个被别的 agent 占用的 issue 时给出 |
-| `candidates` | `/gtw fix *` 看了多少个候选 issue（数字）；`/gtw back` 前缀没命中时列出候选的 worktree 分支（逗号分隔的分支名） |
+| `label` | 挡住这次 fix 的 issue 状态 label（`nightme/wip` / `nightme/ready` / …） |
+| `candidates` | `/gtw fix *` 看了多少个候选 issue（数字） |
+| `worktree_candidates` | `/gtw back` 能跳过去的 worktree 分支（逗号分隔的分支名） |
 | `held` | `/gtw fix *` 看了多少个被别的 agent 占用（带 `nightme/*` 状态 label）而不在候选里的 issue（数字） |
 | `blocked` | 其中多少个因为前置依赖没落地被跳过 |
 | `branch_exists` | 其中多少个因为本地已有同名分支被跳过 |
@@ -81,10 +85,8 @@ type Outcome struct {
 | `pr_number` / `pr_url` | PR 的编号 / 链接 |
 | `pr_state` | PR 自己的状态（`open` / `closed` / `merged`）——`/gtw pr view` 给出 |
 | `base_branch` | PR 的目标分支——`/gtw pr view` 给出 |
-| `mergeable` | PR 现在能不能合（`"1"` / `"0"`）——`/gtw pr view` 给出 |
-| `conflict` | PR 现在有没有冲突（`"1"` / `"0"`）——`/gtw pr view` 给出 |
+| `conflict` | PR 现在有没有冲突（`"true"` / `"false"`）——`/gtw pr view` 给出 |
 | `merge_state` | 平台中立的合并判定（`mergeable` / `conflicting` / `behind` / `unknown` / `blocked`）——`/gtw pr view` 给出 |
-| `url` | issue 在平台上的链接（`/gtw assign` 给出被改动的那个 issue） |
 | `action` | `/gtw assign` 做的是哪一步（`added` / `removed`） |
 | `groups` | review 跑了几组（`/review`） |
 | `findings` | review 收集到的 findings 条数（`/review`） |
@@ -106,6 +108,9 @@ type Outcome struct {
 | `run_id` | `/me start` 这次运行的 id |
 | `iterations` | `/me start -i` 指定的轮数——没有这个 flag 时不出现 |
 | `step` | `/me resume` 和 `/me next` 作用的那一步的 id；命令没有动作时是它看的那一步 |
+| `upstream_status` / `upstream_code` | 回合失败时上游报的状态码与它自己的码 |
+
+值的写法是统一的：布尔是 `"true"` / `"false"`，数字是十进制字符串，枚举是小写 snake。**没有值时键不出现**，不用空串。
 
 `Data` 刻意是 `map[string]string` 而不是 struct：不同命令产出不同的事实，程序只读自己关心的键。
 
@@ -113,54 +118,44 @@ type Outcome struct {
 
 ## 2. Outcome 词汇表
 
+`Status` 是 HTTP 状态码，程序按它的类别分支：
+
 | Status | 含义 |
 | --- | --- |
-| `ok` | 按要求完成了 |
-| `noop` | 没有可做的事——请求有效，但世界已经满足它（查询类命令：`/gtw config` 读设置、`/gtw abort` 没有命令在跑；`/me resume` 和 `/me next` 没有一步可动） |
-| `incomplete` | 做了一部分，剩下的没做完 |
-| `failed` | 没做完。**命令是因为有东西要做才跑的**：提交没有东西可提交、推送没有东西可推送、review 没有 diff 可看、队列里没有可挑的 issue——这些都报 `failed`，让程序和 workflow 知道前提不成立，而不是让它以为一切正常 |
-| `cancelled` | 被用户或操作者中止（`/stop` 停掉的回合、`/gtw abort` 取消的命令、`/review --abort` 取消的 review） |
-| `timeout` | 跑超时了（**保留**，当前没有命令产出它） |
-| `unknown` | 没有任何一方上报过结论 |
+| `2xx` | 正常分支——活干完了，或者没东西可干 |
+| `400` | 请求不合法：命令行、参数、工作区、issue 号、分支名 |
+| `404` | 要的东西不在：issue、PR、worktree、续跑记录、workflow 草稿 |
+| `409` | 与眼下的世界冲突：分支已存在、issue 被占、工作区脏、PR 没提交 |
+| `429` | 上游在限流 |
+| `499` | 有人把它停了（`/stop` 停掉的回合、`/gtw abort` 取消的命令、`/review --abort` 取消的 review） |
+| `500` | 坏了：agent 没跑成、工作区读不了、状态文件坏了、回合死了 |
+| `501` | agent 不支持这个动作 |
+| `503` | 平台或上游不可用：label 写不上、provider 连不上、队列满了 |
+| `0` | 没人报过结论 |
 
-`unknown` 是零值语义：一条没人上报过的消息以此状态 settle；合并时也只有在**没有任何一方上报**的情况下才产生它。
+`2xx` 是正常分支，`4xx` 与 `5xx` 是异常——这一条由 `Status` 的类别决定，程序不必再看别的。
 
-`Status` 说**活干完了没有**，`Data["error"]` 说**有没有东西坏了**——两个轴分开看：
-
-| Status | `Data["error"]` | 含义 |
-| --- | --- | --- |
-| `ok` | 没有 | 活干完了 |
-| `noop` | 没有 | 没有可做的事——请求有效，但世界已经满足它 |
-| `failed` | 没有 | 正常分支——请求有效，只是没东西可做 |
-| `failed` | 有 | 异常——东西坏了 |
-| `cancelled` / `timeout` / `incomplete` | 有或没有 | 这一步没走完 |
-| `unknown` | 没有 | 没有任何一方上报过结论 |
-
-出错说明由命令的共享构造器（`internal/command`）填：报异常时填 `error`，写的是"坏了什么"；报正常分支时不填——答案只是"没东西可做"。哪一条命令报哪一类，是那条命令自己的判断：同一件事在不同命令里可能是不同的类。程序读 `Data["error"]` 在不在，就知道这条命令报的是哪一类。异常同时带 `reason` 和 `error`——前者是给程序分支的码，后者是给人读的解释。别处直接写的结论不带出错说明，按 `status` 和 `reason` 读。
-
-`/gtw`、`/review`、`/cwd`、`/use`、`/stop` 的每一条退出路径都会上报一个非 `unknown` 的结论。`/close`、`/queue`、`/steer`、`/think`、`/tools`、`/watch`、`/new`、`/resume`、`/handoff`、`/wiki` 仍然 settle 成 `unknown`。
-
----
+"没东西可干"也是 `2xx`：`/gtw fix *` 的队列空、`/gtw commit` 没有可提交的、`/gtw pr` 的 PR 已经在了——这些都报 `200`，**没有** `issue` 键或者 `commits=0` 这样的**事实**告诉程序是哪一种。
 
 ## 3. 合并规则
 
 一条消息可能有多方参与（命令本身、它排入的 agent 回合），每方的结论合并成一条。
 
-**严重度**（高的胜出）：
+**失败的一方赢**：命令报"没东西可干"（`200`）盖不住回合死在上游 `429` 上。
 
-```
-failed > cancelled > timeout > incomplete > ok > noop > unknown
-```
+**两边都失败时先报的一方赢**：命令的专属结论不被后到的通用结论顶掉。
 
-**Status**：取更严重的一方；`unknown` 只在都没人上报时出现。`error` 不参与严重度排序——它只说明坏了没有。
+**`Status`**：取胜出的一方。
 
-**Data**：逐键合并，后上报的覆盖先上报的；只有一方拥有的键保留。`error` 走同一条规则：没报错的一方不会抹掉另一方的出错说明——命令报的异常在回合干净结束后依然在合并结果里，后上报的异常也会出现在合并结果里。
+**`StatusText`**：取胜出的一方；胜出的一方没有话时用另一方的。
 
-**Summary**：取胜出方的；严重度相同时先上报的胜出（命令的专属结论不被后到的通用结论顶掉）；胜出方没有 Summary 时用另一方的。
+**`Data`**：逐键合并，后上报的覆盖先上报的；只有一方拥有的键保留。
 
-**prompt-end 的兜底语义**：回合干净结束映射成 `ok`，它是**通用兜底**信号——命令已经上报过结论时，它不覆盖那个结论（命令报 `noop`，最终仍是 `noop`）。回合非正常结束（失败 / 进程死 / 被杀）永远覆盖：失败是新信息。
+**没有状态的一方不算结论**：它只带事实，不说工作做得怎么样，所以它赢不过有状态的一方。`/gtw fix` 派出去的回合被停掉时就是这个情形——事实照样到程序手里，结论由回合给。
 
----
+**没人报过结论的一方**（没有状态、没有话、没有事实）不算失败：说什么都没有不是坏了一件事。
+
+**prompt-end 的兜底语义**：回合干净结束映射成 `200`，它是**通用兜底**信号——命令已经上报过结论时，它不覆盖那个结论（命令报 `200`，最终仍是 `200`）。回合非正常结束（失败 / 进程死 / 被杀）总是参与合并：失败是新信息。
 
 ## 4. settle 的时机
 
@@ -179,13 +174,16 @@ settled 不是"命令返回时"发，是"**这条消息引发的工作全部结�
 
 ### 4.2 等回合结束
 
-`cs.HoldUntilPromptEnd(msgID)` 持一份 hold，直到承载这条消息的 agent 回合结束。回合结束原因映射成结论：
+`cs.HoldUntilPromptEnd(msgID)` 持一份 hold，直到承载这条消息的 agent 回合结束。回合结束原因折进 `Status`：
 
 | 回合结束原因 | Status |
 | --- | --- |
-| 干净结束 | `ok` |
-| 用户停止 / 用户杀死 | `cancelled` |
-| 其他（错误、进程死、卡死被杀） | `failed`（带 `Data["end_reason"]`） |
+| 干净结束 | `200` |
+| 用户停止 / 用户杀死 | `499` |
+| 卡死被杀 | `408` |
+| 错误、进程死 | `500` |
+
+回合失败时上游自己报的状态（`429` 之类）比这张表更准：它直接成为 `Status`，`Data` 里另带 `upstream_status` 与 `upstream_code`。
 
 自动持 hold 的入口：
 
@@ -197,9 +195,9 @@ settled 不是"命令返回时"发，是"**这条消息引发的工作全部结�
 
 命令分发（`inbound.runCommand`）在派发期间持一份 hold，**在命令回复发出之后**才放掉——settled 永远排在命令回复之后。
 
-`/review` 的 hold 在 `Handle` 里**同步**取（不能在 goroutine 里取：那会晚于分发器的 release，导致消息在 review 开始前就 settle 成 `unknown`），goroutine 退出时放掉。
+`/review` 的 hold 在 `Handle` 里**同步**取（不能在 goroutine 里取：那会晚于分发器的 release，导致消息在 review 开始前就 settle 成 `Status` 为 `0` 的结论），goroutine 退出时放掉。
 
-`/gtw fix` 派发 issue 时走 `cs.QueueUserMessage`，它自己持一份 hold 到承载那条消息的回合结束——所以命令返回时消息**不** settle，它等 agent 把 issue 做完。派发失败时没有回合会结束，消息在命令返回时就 settle（结论是 `incomplete` / `dispatch_failed`）。
+`/gtw fix` 派发 issue 时走 `cs.QueueUserMessage`，它自己持一份 hold 到承载那条消息的回合结束——所以命令返回时消息**不** settle，它等 agent 把 issue 做完。派发失败时没有回合会结束，消息在命令返回时就 settle（结论是 `500`：worktree 建好了，issue 没送到 agent）。
 
 ---
 
@@ -217,11 +215,11 @@ settled 不是"命令返回时"发，是"**这条消息引发的工作全部结�
 | `/gtw close` `/gtw back` `/gtw config` `/gtw sync` `/gtw abort` `/gtw assign` | 不跑回合 | 命令返回时 |
 | `/cwd` `/use` `/think` `/tools` `/watch` | 不跑回合 | 命令返回时 |
 | `/new` | 重置会话上下文（不跑回合） | 命令返回时 |
-| `/stop` | 同步结束当前回合 | 被停止的**那条用户消息** settle 成 `cancelled`；`/stop` 自己结算它停掉的那次停（`ok` / `noop` / `failed`） |
-| `/close` | 同步关闭会话（内部结束当前回合） | 被关闭的那条用户消息 settle 成 `cancelled`；`/close` 自己 settle 成 `unknown` |
+| `/stop` | 同步结束当前回合 | 被停止的**那条用户消息** settle 成 `499`；`/stop` 自己结算它停掉的那次停（`200` 或 `4xx` / `5xx`） |
+| `/close` | 同步关闭会话（内部结束当前回合） | 被关闭的那条用户消息 settle 成 `499`；`/close` 自己 settle 成 `Status` 为 `0` 的结论 |
 | `/review` `/review --continue` | review goroutine + 注入回合 | 两者都结束 |
 
-`/stop` 与 `/close` 结束的是**别的** inbound 消息的回合——那条消息拿到 `cancelled`，命令自己的消息独立结算。
+`/stop` 与 `/close` 结束的是**别的** inbound 消息的回合——那条消息拿到 `499`，命令自己的消息独立结算。
 
 ---
 
@@ -243,91 +241,21 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 
 有些消息根本不会走到 agent 回合。它们各自直接结算：
 
-| 情形 | Status | `Data["reason"]` |
-| --- | --- | --- |
-| 命令返回错误 | `failed` | — |
-| 命令 panic | `failed` | `panic` |
-| 队列拒绝这条消息 | `failed` | `queue_full` |
-| 消息被丢弃（换 workspace 的边界清队列 / 队列重置） | `cancelled` | `dropped` |
-| 消息没有 @ 到 bot（watch 模式丢弃） | `noop` | `watch_mode` |
-| 没有 workspace / agent 起不来 | `failed` | `no_agent` |
-| `/gtw fix *` 的队列里没有可选项 | `failed` | `no_candidate` |
-| `/gtw commit` 的工作区没有改动 | `failed` | `nothing_to_commit` |
-| `/gtw push` 的分支没有远端没有的 commit | `failed` | `nothing_to_push` |
-| `/review` 没有可 review 的 diff | `failed` | `no_diff` |
-| `/review` 的 agent 不支持 review | `failed` | `not_supported` |
-| `/review` 的 findings 没能注入 agent | `incomplete` | `inject_failed` |
-
-### 7.1 `reason` 词表
-
-`reason` 是稳定的分类码，程序按它分支，不解析卡片文本。各命令用到的码：
-
-最后一列是这条 outcome 属于哪一类：**正常分支**表示"请求有效，只是没东西可做"（`Data` 里没有 `error`），**异常**表示"东西坏了"（`Data` 里带 `error`）。同一件事在不同命令里可能是不同的类——只有命令自己知道"没发生"是"没东西可做"还是"活已经干完了"。
-
-| 码 | 含义 | 出现在 | 分类 |
-| --- | --- | --- | --- |
-| `usage` | 命令行不合法（未知 flag / 参数缺失 / 位置参数不对） | 全部 | 异常 |
-| `no_cwd` | 命令需要工作区，但没有 | 全部 | 异常 |
-| `wrong_cwd` | `/gtw back <branch>` 要求当前在主仓库根目录或某个 worktree 的根目录 | `/gtw back` | 异常 |
-| `not_found` | 没有 worktree 分支匹配这个前缀（或 worktree 目录没了） | `/gtw back` | 异常 |
-| `ambiguous` | 前缀匹配到多个 worktree 分支，无法确定 | `/gtw back` | 异常 |
-| `already_in_worktree` | chat 已经在这个分支所在的 worktree 里，没有可跳的目标 | `/gtw back` | 正常分支 |
-| `no_session` | 没有聊天会话 | `/stop` | 异常 |
-| `no_agent` | 没有选中的 agent | `/use` / `/review` / `/stop` | 异常 |
-| `unknown_agent` | agent 名没注册 | `/review` / `/gtw commit -g` / `/gtw pr -g` | 异常 |
-| `not_a_repo` | 工作区不在 git 仓库里 | `/gtw` | 异常 |
-| `no_remote` | 仓库没有 `origin` remote | `/gtw fix` / `/gtw assign` | 异常 |
-| `provider_error` | git 平台解析 / 连接失败 | `/gtw fix` / `/gtw new` / `/gtw pr` / `/gtw pr view` / `/gtw assign` | 异常 |
-| `invalid_issue` / `invalid_branch` | issue 号 / 分支名不合法 | `/gtw fix` | 异常 |
-| `issue_not_found` | issue 不存在 | `/gtw fix` / `/gtw assign` | 异常 |
-| `issue_claimed` | 已被别的 fix 占用 | `/gtw fix` | 异常 |
-| `issue_in_state` | issue 带着 `nightme/assigned` 以外的 `nightme/*` 状态 label，别的 agent 正在做 | `/gtw fix` | 异常 |
-| `no_candidate` | `/gtw fix *` 的队列里没有可选项（`Data` 带 `wake_after`） | `/gtw fix` | 正常分支 |
-| `branch_exists` | 分支已经存在 | `/gtw fix` | 异常 |
-| `already_active` | 当前目录已经在一个 `/gtw fix` 里 | `/gtw fix` | 异常 |
-| `no_changes` | agent 的回合结束了，但工作区一个改动都没留下 | `/gtw fix` | 异常 |
-| `label_error` | issue 标签没能加上 / 摘掉 | `/gtw fix` / `/gtw assign` | 异常 |
-| `bad_state` | `.nightme/gtw.yml` 缺失 / 损坏 / 读不了 | `/gtw close` / `/gtw back` | 异常 |
-| `no_active_fix` | 这个聊天没有正在进行的 fix | `/gtw close` / `/gtw back` | 异常 |
-| `dirty` | 工作区有未提交的改动 | `/gtw push` / `/gtw close` | 异常 |
-| `detached` | HEAD 是游离的 | `/gtw push` / `/gtw commit` / `/gtw pr` | 异常 |
-| `conflict` | 有未解决的冲突 | `/gtw commit` | 异常 |
-| `nothing_to_commit` | 工作区没有改动，没有东西可提交 | `/gtw commit` | 两者 † |
-| `nothing_to_push` | 分支没有远端没有的 commit，没有东西可推送 | `/gtw push` | 两者 † |
-| `rejected` | push 被拒绝 | `/gtw push` | 异常 |
-| `not_committed` | agent 跑完了但没有真的提交 | `/gtw commit` | 异常 |
-| `agent_error` | agent 没跑成 / 输出不可用 | `/gtw commit` / `/gtw pr` | 异常 |
-| `no_remote_branch` | 分支还没发布到 origin | `/gtw pr` | 异常 |
-| `no_commits` | 分支和 base 之间没有 commit | `/gtw pr` | 异常 |
-| `pr_exists` | 这个分支已经有 PR 了 | `/gtw pr` | 正常分支 |
-| `merge_conflict` | PR 现在有冲突，合不进去 | `/gtw pr view` | 正常分支 |
-| `pr_behind` | PR 的分支落后于 base | `/gtw pr view` | 正常分支 |
-| `pr_blocked` | 平台挡着这个 PR（草稿 / 未批准 / 检查没过） | `/gtw pr view` | 正常分支 |
-| `state_unknown` | 平台还没算出来这个 PR 能不能合 | `/gtw pr view` | 异常 |
-| `pr_closed` | PR 已经不在 open 状态（`closed` / `merged`） | `/gtw pr view` | 正常分支 |
-| `no_pr` | 这个分支上没有 open 的 PR | `/gtw pr view` | 正常分支 |
-| `pr_not_found` | 这个编号没有对应的 PR | `/gtw pr view` | 异常 |
-| `no_drafts` / `invalid_draft` | 没有草稿 / 草稿不可用 | `/gtw new -y` | 异常 |
-| `config_write_failed` | 全局 agent 没能持久化 | `/review -g` / `/gtw commit -g` / `/gtw pr -g` | 异常 |
-| `no_review` / `already_running` | 没有可续的 review / 已有 review 在跑 | `/review -c` | 异常 |
-| `no_continue` | 没有可续的 `/gtw commit` / `/gtw pr` | `/gtw commit -c` / `/gtw pr -c` | 异常 |
-| `not_supported` | agent 不支持这个动作 | `/stop` / `/review` | 异常 |
-| `no_diff` | 没有可 review 的 diff | `/review` | 异常 |
-| `base_unknown` | base 分支既读不出来也修不好，committed diff 没有被 review | `/review` | 异常 |
-| `not_fixed` | review 找到了 findings，但它们一个都没被改 | `/review` | 异常 |
-| `aborted` | 被 `/gtw abort` / `/review --abort` 取消 | `/gtw` / `/review` | 异常 |
-| `dispatch_failed` | worktree 建好了，但 issue 没送到 agent | `/gtw fix` | 异常 |
-| `sync_failed` | 主体动作完成，随后的 sync 失败 | `/gtw close` / `/gtw back` | 异常 |
-| `workspace_unreachable` | 工作区目录没了，只清了悬空状态 | `/gtw close` | 异常 |
-| `cwd_not_changed` / `cwd_not_restored` | 工作区切了但没切成 | `/gtw close` / `/gtw back` | 异常 |
-| `unknown_subcommand` | `/gtw` 的子命令不存在 | `/gtw` | 异常 |
-| `no_run` | 这个 chat 里没有运行 | `/me resume` / `/me next` | 异常 |
-| `not_paused` | 运行在等一个回答 | `/me resume` / `/me next` | 异常 |
-| `error` | 其它失败 | 全部 | 异常 |
-
-† `nothing_to_commit` 与 `nothing_to_push` 两个码都可能落在任一类：命令先看主信号（工作区没改动 / 没有 commit 被推上去），主信号说"什么都没发生"时再查一次（本地日志相对初始 head 的差异 / 远端还没有的 commit 条数）。查到"活其实早就干完了"就是正常分支（没有 `error`），查到"确实还有东西没做"就是异常（带 `error`）。程序读 `Data["error"]` 在不在就知道是哪一类。
-
----
+| 情形 | Status |
+| --- | --- |
+| 命令返回错误 | `500` |
+| 命令 panic | `500` |
+| 队列拒绝这条消息 | `503` |
+| 消息被丢弃（换 workspace 的边界清队列 / 队列重置） | `499` |
+| 消息没有 @ 到 bot（watch 模式丢弃） | `200` |
+| 没有 workspace | `400` |
+| 没有 agent 起得来 | `500` |
+| `/gtw fix *` 的队列里没有可选项 | `200`（没有 `issue` 键） |
+| `/gtw commit` 的工作区没有改动 | `200`（`commits=0`） |
+| `/gtw push` 的分支没有远端没有的 commit | `200`（`commits=0`） |
+| `/review` 没有可 review 的 diff | `404` |
+| `/review` 的 agent 不支持 review | `501` |
+| `/review` 的 findings 没能注入 agent | `500` |
 
 ## 8. 旁听通道（Tracker）
 
@@ -354,5 +282,5 @@ settled 是一条消息的**结论**。程序往往还想知道这条消息**走
 
 - settled 只在**工作真正结束**时发出。一轮很长的 agent 回合会把 settled 往后推——这是设计意图：settled 报的是结束，不是开始。
 - `/steer` 的文本由下一个 prompt-end 或下一条入队消息冲刷队列，settled 跟着承载它的那个回合。
-- 没有任何一方上报结论时，settled 是 `unknown`——它表示"没有结论"，不是"成功"。
+- 没有任何一方上报结论时，settled 的 `Status` 是 `0`——它表示"没有结论"，不是"成功"。
 - IM channel 丢弃 settled，所以从聊天窗口看不到它；要确认一条消息真的结束了，看 daemon 日志。

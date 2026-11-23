@@ -5,14 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/pathutil"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // RunBack is the entry point for `/gtw back`. The non-destructive
@@ -79,7 +80,7 @@ func RunBack(
 	if selectedCwd == "" {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ "+command.NoActiveCwdReply,
-			command.FailedOutcome("no_cwd", "the command needs an active workspace")), nil
+			command.FailedOutcome(http.StatusBadRequest, "the command needs an active workspace")), nil
 	}
 
 	// --- step 1+2: locate the snapshot ---------------------------
@@ -90,17 +91,17 @@ func RunBack(
 				"❌ no active fix to back out of in this chat\n"+
 					"hint: /cwd into the /gtw fix worktree first (its "+
 					"`.nightme/gtw.yml` is the back source of truth).",
-				command.FailedOutcome("no_active_fix", "there is no active fix to leave")), nil
+				command.FailedOutcome(http.StatusNotFound, "there is no active fix to leave")), nil
 		}
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err),
-			command.FailedOutcome("bad_state", "the gtw state file could not be read")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the gtw state file could not be read")), nil
 	}
 
 	if c.RepoRoot == "" {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ .nightme/gtw.yml is malformed: repoRoot is empty",
-			command.FailedOutcome("bad_state", "the gtw state file is malformed")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the gtw state file is malformed")), nil
 	}
 	// Worktree may legitimately be empty for a freshly-started
 	// fix that hasn't reached §5.2.④ yet — back is still safe
@@ -122,13 +123,13 @@ func RunBack(
 			fmt.Sprintf("⚠️ SetSelectedCwd(%s) failed: %v\n"+
 				"worktree at %s is unchanged; run `/cwd %s` manually.",
 				c.RepoRoot, err, c.Worktree, c.RepoRoot),
-			messages.Outcome{
-				Status:  messages.OutcomeIncomplete,
-				Summary: "the chat stayed in the worktree",
+			outcome.Outcome{
+				Success:    false,
+				Status:     http.StatusInternalServerError,
+				StatusText: "the chat stayed in the worktree",
 				Data: map[string]string{
-					"reason":    "cwd_not_changed",
-					"worktree":  c.Worktree,
-					"repo_root": c.RepoRoot,
+					KeyWorktree: c.Worktree,
+					KeyRepoRoot: c.RepoRoot,
 				},
 			}), nil
 	}
@@ -197,32 +198,55 @@ func RunBack(
 	// is a separate step. A failed sync leaves the chat in the
 	// main repo but the main branch unrefreshed.
 	if syncErr != nil {
-		reportOutcome(ctx, messages.Outcome{
-			Status:  messages.OutcomeIncomplete,
-			Summary: "the chat left the worktree but the main branch could not be synced",
+		reportOutcome(ctx, outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "the chat left the worktree but the main branch could not be synced",
 			Data: map[string]string{
-				"reason":    "sync_failed",
-				"worktree":  c.Worktree,
-				"repo_root": c.RepoRoot,
+				KeyWorktree: c.Worktree,
+				KeyRepoRoot: c.RepoRoot,
 			},
 		})
 		return &Result{Consumed: true}, nil
 	}
-	reportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: "the chat left the worktree",
+	reportOutcome(ctx, outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the chat left the worktree",
 		Data: map[string]string{
-			"worktree":  c.Worktree,
-			"repo_root": c.RepoRoot,
+			KeyWorktree: c.Worktree,
+			KeyRepoRoot: c.RepoRoot,
 		},
 	})
 	return &Result{Consumed: true}, nil
 }
 
+// matchReason is why a worktree branch lookup failed.
+type matchReason int
+
+const (
+	// matchNotFound means the argument matched no worktree branch.
+	matchNotFound matchReason = iota
+	// matchAmbiguous means the argument matched more than one.
+	matchAmbiguous
+)
+
+// matchStatus maps the reason of a worktree branch lookup onto the
+// status of the outcome that reports it.
+//
+// Nothing matched: the branch is not there (404). Several matched:
+// the name is not specific enough (400).
+func matchStatus(reason matchReason) int {
+	if reason == matchAmbiguous {
+		return http.StatusBadRequest
+	}
+	return http.StatusNotFound
+}
+
 // worktreeMatchError is the failure of resolveWorktreeBranch: the
 // argument matched no worktree branch, or matched more than one.
 type worktreeMatchError struct {
-	Reason    string // "not_found" | "ambiguous"
+	Reason    matchReason
 	Arg       string // the argument the user typed
 	Matches   []WorktreeEntry
 	Available []WorktreeEntry
@@ -230,7 +254,7 @@ type worktreeMatchError struct {
 
 // Error implements error. The text doubles as the outcome summary.
 func (e *worktreeMatchError) Error() string {
-	if e.Reason == "ambiguous" {
+	if e.Reason == matchAmbiguous {
 		return fmt.Sprintf("%s matches several worktree branches", e.Arg)
 	}
 	return fmt.Sprintf("no worktree branch matches %s", e.Arg)
@@ -240,7 +264,7 @@ func (e *worktreeMatchError) Error() string {
 // matches for an ambiguous prefix, every worktree branch for a
 // miss.
 func (e *worktreeMatchError) candidates() []WorktreeEntry {
-	if e.Reason == "ambiguous" {
+	if e.Reason == matchAmbiguous {
 		return e.Matches
 	}
 	return e.Available
@@ -250,6 +274,20 @@ func (e *worktreeMatchError) candidates() []WorktreeEntry {
 func branchNames(entries []WorktreeEntry) []string {
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
+		names = append(names, e.Branch)
+	}
+	return names
+}
+
+// otherWorktreeBranches names the worktrees the chat could have
+// jumped to: every worktree of the repository but the one it sits
+// in.
+func otherWorktreeBranches(entries []WorktreeEntry, currentPath string) []string {
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if sameWorktreePath(e.Path, currentPath) {
+			continue
+		}
 		names = append(names, e.Branch)
 	}
 	return names
@@ -294,13 +332,13 @@ func resolveWorktreeBranch(entries []WorktreeEntry, primary, arg string) (Worktr
 	switch len(candidates) {
 	case 0:
 		return WorktreeEntry{}, &worktreeMatchError{
-			Reason: "not_found", Arg: arg, Available: available,
+			Reason: matchNotFound, Arg: arg, Available: available,
 		}
 	case 1:
 		return candidates[0], nil
 	default:
 		return WorktreeEntry{}, &worktreeMatchError{
-			Reason: "ambiguous", Arg: arg, Matches: candidates,
+			Reason: matchAmbiguous, Arg: arg, Matches: candidates,
 		}
 	}
 }
@@ -311,7 +349,7 @@ func resolveWorktreeBranch(entries []WorktreeEntry, primary, arg string) (Worktr
 // two failures the same way.
 func renderWorktreeMatchError(e *worktreeMatchError) string {
 	var b strings.Builder
-	if e.Reason == "ambiguous" {
+	if e.Reason == matchAmbiguous {
 		fmt.Fprintf(&b, "❌ %q matches %d worktree branches:\n", e.Arg, len(e.Matches))
 		for _, m := range e.Matches {
 			fmt.Fprintf(&b, "→ %s\n", m.Branch)
@@ -395,7 +433,7 @@ func RunBackToWorktree(
 	if selectedCwd == "" {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ "+command.NoActiveCwdReply,
-			command.FailedOutcome("no_cwd", "the command needs an active workspace")), nil
+			command.FailedOutcome(http.StatusBadRequest, "the command needs an active workspace")), nil
 	}
 
 	// --- the chat must be in a git repository -------------------
@@ -406,7 +444,7 @@ func RunBackToWorktree(
 	if _, err := RepoRoot(ctx, selectedCwd, deps.Git); err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
-			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository")), nil
+			command.FailedOutcome(http.StatusBadRequest, "the workspace is not inside a git repository")), nil
 	}
 
 	// --- the worktrees of this repository -----------------------
@@ -418,12 +456,12 @@ func RunBackToWorktree(
 	if lerr != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ git worktree list: %v", lerr),
-			command.FailedOutcome("error", "the worktrees could not be listed")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the worktrees could not be listed")), nil
 	}
 	if len(entries) == 0 {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
-			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository")), nil
+			command.FailedOutcome(http.StatusBadRequest, "the workspace is not inside a git repository")), nil
 	}
 	primary := entries[0].Path
 
@@ -454,7 +492,7 @@ func RunBackToWorktree(
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ /gtw back <branch> requires cwd at the main repo root or a worktree root\n"+
 				fmt.Sprintf("current cwd is not a repository root; run `/cwd %s` first.", root),
-			command.FailedOutcome("wrong_cwd",
+			command.FailedOutcome(http.StatusBadRequest,
 				"the chat is not at the main repo root or a worktree root")), nil
 	}
 
@@ -463,21 +501,21 @@ func RunBackToWorktree(
 	if branch == "" {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ /gtw back: branch name is empty",
-			command.FailedOutcome("usage", "no branch name was given")), nil
+			command.FailedOutcome(http.StatusBadRequest, "no branch name was given")), nil
 	}
 	entry, matchErr := resolveWorktreeBranch(entries, primary, branch)
 	if matchErr != nil {
 		card := renderWorktreeMatchError(matchErr)
-		if current != nil && matchErr.Reason == "not_found" {
+		if current != nil && matchErr.Reason == matchNotFound {
 			// From a worktree the main repo is one command away,
 			// and the branch the user wants may well live there.
 			card += "\nhint: run `/gtw back` (no arg) to return to the main repo"
 		}
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			card,
-			command.FailedOutcomeData(matchErr.Reason, matchErr.Error(),
+			command.FailedOutcomeData(matchStatus(matchErr.Reason), matchErr.Error(),
 				map[string]string{
-					"candidates": strings.Join(branchNames(matchErr.candidates()), ", "),
+					KeyWorktreeCandidates: strings.Join(branchNames(matchErr.candidates()), ", "),
 				})), nil
 	}
 	worktreePath := entry.Path
@@ -489,15 +527,15 @@ func RunBackToWorktree(
 				fmt.Sprintf("❌ worktree for %q is gone: %s\n"+
 					"hint: run `git worktree prune` to drop the stale entry",
 					branch, worktreePath),
-				command.FailedOutcome("not_found", "the worktree directory is gone")), nil
+				command.FailedOutcome(http.StatusNotFound, "the worktree directory is gone")), nil
 		}
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ stat worktree path: %v", serr),
-			command.FailedOutcome("error", "the worktree path could not be read")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the worktree path could not be read")), nil
 	} else if !info.IsDir() {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %s exists but is not a directory", worktreePath),
-			command.FailedOutcome("error", "the worktree path is not a directory")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the worktree path is not a directory")), nil
 	}
 
 	// --- yml: skip if present, repair from git if missing -----
@@ -514,7 +552,7 @@ func RunBackToWorktree(
 		if !os.IsNotExist(serr) {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ stat .nightme/gtw.yml: %v", serr),
-				command.FailedOutcome("bad_state", "the gtw state file could not be read")), nil
+				command.FailedOutcome(http.StatusInternalServerError, "the gtw state file could not be read")), nil
 		}
 		if owned {
 			// Recover a qualified stub from git.
@@ -539,7 +577,7 @@ func RunBackToWorktree(
 			if werr != nil && !errors.Is(werr, ErrGtwYmlExists) {
 				return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 					fmt.Sprintf("❌ repair .nightme/gtw.yml: %v", werr),
-					command.FailedOutcome("bad_state", "the gtw state file could not be repaired")), nil
+					command.FailedOutcome(http.StatusInternalServerError, "the gtw state file could not be repaired")), nil
 			}
 			// ErrGtwYmlExists: another chat raced ahead and wrote
 			// the yml between our stat and write. The desired
@@ -577,14 +615,17 @@ func RunBackToWorktree(
 			entry.Branch, strings.Join(rows, "\n"))
 		reply(ctx, cs.Emitter(), chatID, messageID, body)
 
-		reportOutcome(ctx, messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: fmt.Sprintf("the chat is already in the worktree %s", current.Path),
+		reportOutcome(ctx, outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: fmt.Sprintf("the chat is already in the worktree %s", current.Path),
 			Data: map[string]string{
-				"reason":    "already_in_worktree",
-				"worktree":  current.Path,
-				"repo_root": primary,
-				"branch":    entry.Branch,
+				KeyWorktree: current.Path,
+				KeyRepoRoot: primary,
+				KeyBranch:   entry.Branch,
+				// The worktrees the chat could have jumped to: it
+				// is already in one, so there was nowhere to go.
+				KeyWorktreeCandidates: strings.Join(otherWorktreeBranches(entries, current.Path), ", "),
 			},
 		})
 		return &Result{Consumed: true}, nil
@@ -604,12 +645,12 @@ func RunBackToWorktree(
 				"worktree at %s is intact%s; run `/cwd %s` manually.",
 				worktreePath, serr, worktreePath,
 				ymlRepairSuffix(repaired), worktreePath),
-			messages.Outcome{
-				Status:  messages.OutcomeIncomplete,
-				Summary: "the chat stayed outside the worktree",
+			outcome.Outcome{
+				Success:    false,
+				Status:     http.StatusInternalServerError,
+				StatusText: "the chat stayed outside the worktree",
 				Data: map[string]string{
-					"reason":   "cwd_not_changed",
-					"worktree": worktreePath,
+					KeyWorktree: worktreePath,
 				},
 			}), nil
 	}
@@ -630,13 +671,14 @@ func RunBackToWorktree(
 	body := fmt.Sprintf("✅ back into `%s`\n%s", worktreePath, strings.Join(rows, "\n"))
 	reply(ctx, cs.Emitter(), chatID, messageID, body)
 
-	reportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: fmt.Sprintf("the chat entered the worktree %s", worktreePath),
+	reportOutcome(ctx, outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: fmt.Sprintf("the chat entered the worktree %s", worktreePath),
 		Data: map[string]string{
-			"worktree":  worktreePath,
-			"repo_root": primary,
-			"branch":    entry.Branch,
+			KeyWorktree: worktreePath,
+			KeyRepoRoot: primary,
+			KeyBranch:   entry.Branch,
 		},
 	})
 	return &Result{Consumed: true}, nil

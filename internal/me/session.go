@@ -29,6 +29,7 @@ package me
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +37,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -324,7 +326,7 @@ func (s *Service) closeRoundSession(ctx context.Context, r *run) {
 	ctx = context.WithoutCancel(r.ctx)
 	s.publishReply(ctx, r, sess, roundEndedLine(rec))
 	s.publishReply(ctx, r, sess, decisionsText(rec))
-	s.publishResult(ctx, r, sess, string(rec.Outcome.Status))
+	s.publishResult(ctx, r, sess, strconv.Itoa(rec.Outcome.Status))
 	r.setRoundSession(nil)
 }
 
@@ -413,11 +415,8 @@ func (r *run) stepErrorLocked(stepID string) string {
 		if st.ID != stepID {
 			continue
 		}
-		if text := st.Outcome.Data[wfe.OutcomeKeyError]; text != "" {
-			return text
-		}
-		if st.Outcome.Summary != "" && !st.Outcome.Succeeded() {
-			return st.Outcome.Summary
+		if st.Outcome.StatusText != "" && !st.Outcome.Succeeded() {
+			return st.Outcome.StatusText
 		}
 	}
 	return ""
@@ -427,7 +426,7 @@ func (r *run) stepErrorLocked(stepID string) string {
 //
 // The verdict is the last action the round took: the outcome of the
 // step that ended it.
-func (r *run) roundOutcome(job string, round int) wfe.Outcome {
+func (r *run) roundOutcome(job string, round int) outcome.Outcome {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i := len(r.policy.History) - 1; i >= 0; i-- {
@@ -443,7 +442,7 @@ func (r *run) roundOutcome(job string, round int) wfe.Outcome {
 		}
 		return rec.Outcome
 	}
-	return wfe.Outcome{Status: wfe.OutcomeUnknown}
+	return outcome.Outcome{}
 }
 
 // roundIdentity renders the name of a job round.

@@ -24,6 +24,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // reportOutcome merges a structured outcome into the inbound
@@ -32,17 +33,18 @@ import (
 // A run cancelled by /gtw abort reports `cancelled` — the factory
 // does that once, when it notices the cancellation.
 //
-// A `failed` verdict from a cancelled run is dropped: the failure is
-// a consequence of the cancellation (the subprocess was killed
-// mid-flight), and `failed` outranks `cancelled` in the merge, so
-// keeping it would report the cancellation as a failure. The other
-// verdicts are kept: `ok`, `noop` and `incomplete` all rank below
-// `cancelled`, so the merged status stays `cancelled` while their
-// Data — the worktree that was removed, the branch that was
-// deleted — still reaches the program.
-func reportOutcome(ctx context.Context, o messages.Outcome) {
-	if aborted(ctx) && o.Status == messages.OutcomeFailed {
-		return
+// A failure from a cancelled run is reported as the cancellation: the
+// failure is a consequence of the cancellation (the subprocess was
+// killed mid-flight), and a failure outranks a cancellation in the
+// merge, so keeping it would report the cancellation as a breakage.
+//
+// The facts the command produced still reach the program: a /gtw
+// close that removed the worktree and was aborted during its sync did
+// remove the worktree.
+func reportOutcome(ctx context.Context, o outcome.Outcome) {
+	if aborted(ctx) && !o.Success && o.Status != outcome.StatusClientClosedRequest {
+		o.Status = outcome.StatusClientClosedRequest
+		o.StatusText = "the command was cancelled by /gtw abort"
 	}
 	chatsession.ReportOutcome(ctx, o)
 }
@@ -57,7 +59,7 @@ func replyOutcome(
 	ctx context.Context,
 	em messages.Emitter,
 	chatID, messageID, text string,
-	o messages.Outcome,
+	o outcome.Outcome,
 ) *Result {
 	reportOutcome(ctx, o)
 	return reply(ctx, em, chatID, messageID, text)
@@ -71,7 +73,7 @@ func replyAgentOutcome(
 	em messages.Emitter,
 	chatID, messageID, text, agentName string,
 	res agent.RunResult,
-	o messages.Outcome,
+	o outcome.Outcome,
 ) *Result {
 	reportOutcome(ctx, o)
 	return replyAgent(ctx, em, chatID, messageID, text, agentName, res)

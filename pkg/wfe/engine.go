@@ -3,8 +3,12 @@ package wfe
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // DecisionKind is what the engine decided about a run.
@@ -194,9 +198,10 @@ func ReadySet(state *RunState, wf *Workflow) ([]Step, error) {
 // recordSkipped records the steps whose condition did not hold.
 func recordSkipped(state *RunState, skipped []readyStep) {
 	for _, step := range skipped {
-		RecordStep(state, step.Job, step.Step, Outcome{
-			Status:  OutcomeNoop,
-			Summary: "the step's condition did not hold",
+		RecordStep(state, step.Job, step.Step, outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "the step's condition did not hold",
 		}, true)
 	}
 }
@@ -344,9 +349,10 @@ func EndRound(state *RunState, wf *Workflow, job string) error {
 			// cut short.
 			continue
 		}
-		RecordStep(state, job, step, Outcome{
-			Status:  OutcomeNoop,
-			Summary: "the round was ended before this step ran",
+		RecordStep(state, job, step, outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "the round was ended before this step ran",
 		}, true)
 	}
 	if state.EndedRounds == nil {
@@ -394,7 +400,7 @@ func clearJobSteps(state *RunState, wf *Workflow, name string) {
 // exhaustedReason explains why a run with nothing ready has to stop.
 func exhaustedReason(prev StepState, hasPrev bool) string {
 	if hasPrev && !prev.Outcome.Succeeded() {
-		return fmt.Sprintf("the plan is exhausted and the last step %q ended as %q",
+		return fmt.Sprintf("the plan is exhausted and the last step %q ended with status %d",
 			prev.ID, prev.Outcome.Status)
 	}
 	return "the plan is exhausted: every step has run"
@@ -405,8 +411,8 @@ func exhaustedReason(prev StepState, hasPrev bool) string {
 // The error description rides along: it says what broke, and the agent
 // reads the reason before anything else.
 func prevReason(prev StepState) string {
-	reason := fmt.Sprintf("the previous step %q ended as %q", prev.ID, prev.Outcome.Status)
-	if desc := reasonDetail(prev.Outcome.Data[OutcomeKeyError]); desc != "" {
+	reason := fmt.Sprintf("the previous step %q ended with status %d", prev.ID, prev.Outcome.Status)
+	if desc := reasonDetail(prev.Outcome.StatusText); desc != "" {
 		reason += ": " + desc
 	}
 	return reason
@@ -598,7 +604,7 @@ func lastRun(state *RunState) (StepState, bool) {
 // is its latest one. A step that runs again therefore replaces the
 // verdict the step had. A repair — a command the agent issued for the
 // step — does not: it never reaches this function.
-func RecordStep(state *RunState, job string, step Step, out Outcome, skipped bool) {
+func RecordStep(state *RunState, job string, step Step, out outcome.Outcome, skipped bool) {
 	if state == nil {
 		return
 	}
@@ -644,7 +650,7 @@ func RecordPending(state *RunState, job string, step Step) {
 		ID:      step.ID,
 		Job:     job,
 		Round:   round,
-		Outcome: Outcome{Status: OutcomeUnknown},
+		Outcome: outcome.Outcome{},
 		Pending: true,
 	})
 }
@@ -695,10 +701,10 @@ func StepByID(wf *Workflow, stepID string) *Step {
 // LastOutcome returns the outcome of the last step that ran.
 //
 // A step that was skipped does not count: the chain continues past it.
-func LastOutcome(state *RunState) (Outcome, bool) {
+func LastOutcome(state *RunState) (outcome.Outcome, bool) {
 	prev, ok := lastRun(state)
 	if !ok {
-		return Outcome{}, false
+		return outcome.Outcome{}, false
 	}
 	return prev.Outcome, true
 }
@@ -729,11 +735,12 @@ func buildExprCtx(state *RunState) ExprCtx {
 }
 
 // outcomeOutputs renders an outcome as the outputs an expression
-// reads: status, summary and one data.<key> per fact.
-func outcomeOutputs(o Outcome) map[string]string {
+// reads: success, status, statusText and one data.<key> per fact.
+func outcomeOutputs(o outcome.Outcome) map[string]string {
 	out := map[string]string{
-		"status":  string(o.Status),
-		"summary": o.Summary,
+		"success":    strconv.FormatBool(o.Success),
+		"status":     strconv.Itoa(o.Status),
+		"statusText": o.StatusText,
 	}
 	for k, v := range o.Data {
 		out["data."+k] = v

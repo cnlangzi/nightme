@@ -8,12 +8,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // --- the flag ---
@@ -219,8 +219,8 @@ func TestDispatchPR_Ready_LabelFailureKeepsTheOutcome(t *testing.T) {
 	if got == nil {
 		t.Fatal("no settled outcome")
 	}
-	if got.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %s, want ok — the pull request is open", got.Status)
+	if got.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want ok — the pull request is open", got.Status)
 	}
 	mustContain(t, reply, "⚠️")
 }
@@ -525,8 +525,8 @@ func TestDispatchPR_Ready_PRLabelFailureKeepsTheOutcome(t *testing.T) {
 	if got == nil {
 		t.Fatal("no settled outcome")
 	}
-	if got.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %s, want ok — the pull request is open", got.Status)
+	if got.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want ok — the pull request is open", got.Status)
 	}
 	mustContain(t, reply, "⚠️")
 	mustContain(t, reply, "could not add the `nightme/ready` label to PR #7")

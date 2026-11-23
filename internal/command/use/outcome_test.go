@@ -7,6 +7,7 @@ package use
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"testing"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // outcomeEmitter records the outbound messages of a chat session —
@@ -32,7 +34,7 @@ func (e *outcomeEmitter) Send(_ context.Context, m messages.OutboundMessage) (st
 	return "", nil
 }
 
-func (e *outcomeEmitter) settled() *messages.Outcome {
+func (e *outcomeEmitter) settled() *outcome.Outcome {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, m := range e.sent {
@@ -62,7 +64,7 @@ func (d *quietDriver) Ping(context.Context) error { return nil }
 
 // runUse runs /use with the given argv and returns the outcome it
 // reported.
-func runUse(t *testing.T, argv ...string) *messages.Outcome {
+func runUse(t *testing.T, argv ...string) *outcome.Outcome {
 	t.Helper()
 	mgr := chatsession.NewManager()
 	cs, err := mgr.GetOrCreate("use-outcome", "claude")
@@ -99,11 +101,8 @@ func TestUseOutcome(t *testing.T) {
 		if got == nil {
 			t.Fatal("no settled outcome: /use reported nothing")
 		}
-		if got.Status != messages.OutcomeFailed {
-			t.Fatalf("outcome = %+v, want failed", got)
-		}
-		if got.Data["reason"] != "usage" {
-			t.Errorf("outcome reason = %q, want usage", got.Data["reason"])
+		if got.Status != http.StatusBadRequest {
+			t.Errorf("outcome status = %d, want %d", got.Status, http.StatusBadRequest)
 		}
 	})
 
@@ -112,11 +111,8 @@ func TestUseOutcome(t *testing.T) {
 		if got == nil {
 			t.Fatal("no settled outcome: /use reported nothing")
 		}
-		if got.Status != messages.OutcomeFailed {
-			t.Fatalf("outcome = %+v, want failed", got)
-		}
-		if got.Data["reason"] != "usage" {
-			t.Errorf("outcome reason = %q, want usage", got.Data["reason"])
+		if got.Status != http.StatusBadRequest {
+			t.Errorf("outcome status = %d, want %d", got.Status, http.StatusBadRequest)
 		}
 	})
 
@@ -157,7 +153,7 @@ func TestUseOutcome(t *testing.T) {
 		if got == nil {
 			t.Fatal("no settled outcome: /use reported nothing")
 		}
-		if got.Status != messages.OutcomeOK {
+		if got.Status != http.StatusOK {
 			t.Fatalf("outcome = %+v, want ok", got)
 		}
 		if got.Data["agent"] != "claude" {

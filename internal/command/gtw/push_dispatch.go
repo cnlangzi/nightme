@@ -3,10 +3,11 @@ package gtw
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // dispatchPush is the dispatcher for /gtw push. After the F-XX
@@ -56,7 +57,7 @@ func dispatchPush(
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ read worktree status: %v", err),
-			command.FailedOutcome("error", "the worktree status could not be read")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the worktree status could not be read")), nil
 	}
 	if snap == nil {
 		// (nil, nil) from CollectReadiness = not a git repo, empty
@@ -66,14 +67,14 @@ func dispatchPush(
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ cannot read worktree git status — refusing to push\n"+
 				"hint: ensure the worktree is inside a git repo with at least one commit",
-			command.FailedOutcome("not_a_repo", "the worktree is not a git repository")), nil
+			command.FailedOutcome(http.StatusBadRequest, "the worktree is not a git repository")), nil
 	}
 
 	// 1. Hard-refuse conflicts. Pushing an unresolved state would
 	// land a broken tip on origin — no override.
 	if reason := snap.PushBlockReason(); reason != "" {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, reason,
-			command.FailedOutcome("error", "the worktree has unresolved conflicts")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the worktree has unresolved conflicts")), nil
 	}
 
 	// 1b. Refuse detached HEAD. Pushing from detached HEAD with
@@ -86,7 +87,7 @@ func dispatchPush(
 	if snap.Branch == "" {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ detached HEAD — checkout a named branch first",
-			command.FailedOutcome("detached", "the worktree is on a detached HEAD")), nil
+			command.FailedOutcome(http.StatusConflict, "the worktree is on a detached HEAD")), nil
 	}
 
 	// 1c. Refuse dirty worktree. After the F-XX commit/push split,
@@ -98,7 +99,7 @@ func dispatchPush(
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ worktree is dirty — /gtw push no longer auto-commits\n"+
 				"hint: run `/gtw commit` first, then `/gtw push`",
-			command.FailedOutcome("dirty", "the worktree has uncommitted changes")), nil
+			command.FailedOutcome(http.StatusConflict, "the worktree has uncommitted changes")), nil
 	}
 
 	// 2. Nothing to push. A push runs because the branch carries
@@ -128,7 +129,7 @@ func dispatchPush(
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ read origin/%s: %v", c.Branch, err),
-			command.FailedOutcome("error", "the remote branch could not be read")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the remote branch could not be read")), nil
 	}
 
 	// 4. Push with retry + post-push verification
@@ -137,7 +138,7 @@ func dispatchPush(
 		// err.Error() is already a complete IM-friendly message
 		// (per F-56 §4.3 design). Paste it straight in.
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, err.Error(),
-			command.FailedOutcome("rejected", "the push was rejected")), nil
+			command.FailedOutcome(http.StatusConflict, "the push was rejected")), nil
 	}
 
 	// 5. Build the success card from git log — NOT from agent
@@ -172,7 +173,7 @@ func dispatchPush(
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ push succeeded but couldn't render card: %v", err),
-			command.FailedOutcome("error", "the push landed but its result could not be read")), nil
+			command.FailedOutcome(http.StatusInternalServerError, "the push landed but its result could not be read")), nil
 	}
 	// The push landed no commit: the branch carried nothing the
 	// remote did not have. The remote's tip is the second check —
@@ -186,16 +187,17 @@ func dispatchPush(
 	// remote-tracking ref is updated by the push itself.
 	remoteHead, _ := originBranchSHA(ctx, c.Worktree, c.Branch, deps)
 	data := map[string]string{
-		"branch":  c.Branch,
-		"commits": fmt.Sprintf("%d", commitCount),
+		KeyBranch:  c.Branch,
+		KeyCommits: fmt.Sprintf("%d", commitCount),
 	}
 	if remoteHead != "" {
 		data["remote_head"] = remoteHead
 	}
 	return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card,
-		messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: fmt.Sprintf("pushed %d commit(s) to %s", commitCount, c.Branch),
-			Data:    data,
+		outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: fmt.Sprintf("pushed %d commit(s) to %s", commitCount, c.Branch),
+			Data:       data,
 		}), nil
 }

@@ -2,69 +2,49 @@ package command
 
 // The outcome constructors every command shares.
 //
-// An outcome says two things about a failure: the status says the
-// work did not get done, the error description says whether something
-// broke. The second is what separates an exception from a normal
-// branch — a request that was valid and had nothing to do.
+// An outcome says two things about a failure: the status says which
+// kind of breakage it was, and the words say what broke. The status
+// alone tells a consumer whether the flow can go on by itself.
 
 import (
+	"net/http"
 	"testing"
 
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
-// TestFailedOutcome_CarriesTheErrorDescription — an exception says
-// what broke.
-func TestFailedOutcome_CarriesTheErrorDescription(t *testing.T) {
-	got := FailedOutcome("provider_error", "the git host could not be reached")
-	if got.Status != messages.OutcomeFailed {
-		t.Errorf("status = %s, want %s", got.Status, messages.OutcomeFailed)
+// TestFailedOutcome_SaysWhatBroke — a failure carries its status and
+// the one line of words that says what broke.
+func TestFailedOutcome_SaysWhatBroke(t *testing.T) {
+	got := FailedOutcome(http.StatusServiceUnavailable, "the git host could not be reached")
+	if got.Success {
+		t.Error("a failure is not a success")
 	}
-	if got.Data["error"] == "" {
-		t.Errorf("the error description is empty; an exception must say what broke")
+	if got.Status != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", got.Status, http.StatusServiceUnavailable)
 	}
-	if got.Data["error"] != "the git host could not be reached" {
-		t.Errorf("the error description = %q, want the summary", got.Data["error"])
+	if got.StatusText != "the git host could not be reached" {
+		t.Errorf("the words = %q, want the summary", got.StatusText)
 	}
-}
-
-// TestFailedOutcome_EmptySummaryFallsBackToTheReason — a failure
-// without a summary still says what broke: the reason code.
-func TestFailedOutcome_EmptySummaryFallsBackToTheReason(t *testing.T) {
-	got := FailedOutcome("bad_state", "")
-	if got.Data["error"] != "bad_state" {
-		t.Errorf("the error description = %q, want the reason code", got.Data["error"])
+	if got.Exception() != true {
+		t.Error("a failure is an exception")
 	}
 }
 
-// TestFailedOutcome_CallerDescriptionWins — a caller that knows more
-// than the summary says so, and the summary keeps its own meaning.
-func TestFailedOutcome_CallerDescriptionWins(t *testing.T) {
-	got := FailedOutcome("rejected", "the push was rejected",
-		"the remote refused the non-fast-forward")
-	if got.Data["error"] != "the remote refused the non-fast-forward" {
-		t.Errorf("the error description = %q, want the caller's own", got.Data["error"])
-	}
-	if got.Summary != "the push was rejected" {
-		t.Errorf("the summary = %q, want it unchanged", got.Summary)
-	}
-}
-
-// TestFailedOutcome_EmptyReasonStillDescribes — a failure with no
-// summary and no reason code still says that something broke: the
-// description is never empty.
-func TestFailedOutcome_EmptyReasonStillDescribes(t *testing.T) {
-	got := FailedOutcome("", "")
-	if got.Data["error"] == "" {
-		t.Errorf("the error description is empty; an exception must say what broke")
+// TestFailedOutcome_CarriesNoCategoryCode — the situation is the
+// status and the facts; there is no code beside them.
+func TestFailedOutcome_CarriesNoCategoryCode(t *testing.T) {
+	got := FailedOutcome(http.StatusBadRequest, "the command line is not valid")
+	if len(got.Data) != 0 {
+		t.Errorf("a failure carries no facts of its own; the data is %v", got.Data)
 	}
 }
 
 // TestFailedOutcomeData_KeepsTheExtraFacts — the facts a command
 // reports beside the failure reach the program together with the
-// description.
+// words.
 func TestFailedOutcomeData_KeepsTheExtraFacts(t *testing.T) {
-	got := FailedOutcomeData("agent_error", "the agent did not commit the work",
+	got := FailedOutcomeData(http.StatusInternalServerError, "the agent did not commit the work",
 		map[string]string{"branch": "feat/x", "worktree": "/tmp/wt"})
 	if got.Data["branch"] != "feat/x" {
 		t.Errorf("the branch = %q, want it kept", got.Data["branch"])
@@ -72,76 +52,56 @@ func TestFailedOutcomeData_KeepsTheExtraFacts(t *testing.T) {
 	if got.Data["worktree"] != "/tmp/wt" {
 		t.Errorf("the worktree = %q, want it kept", got.Data["worktree"])
 	}
-	if got.Data["error"] != "the agent did not commit the work" {
-		t.Errorf("the error description = %q, want the summary", got.Data["error"])
+	if got.StatusText != "the agent did not commit the work" {
+		t.Errorf("the words = %q, want the summary", got.StatusText)
 	}
 }
 
-// TestBranchOutcome_IsANormalResult — a normal branch reports the
-// reason code and no error description: nothing broke, there was
-// nothing to do.
-func TestBranchOutcome_IsANormalResult(t *testing.T) {
-	got := BranchOutcome("nothing_to_commit", "the worktree has nothing to commit",
-		map[string]string{"branch": "feat/x"})
-	if got.Status != messages.OutcomeFailed {
-		t.Errorf("status = %s, want %s — the work asked for did not happen",
-			got.Status, messages.OutcomeFailed)
+// TestSuccessOutcome_IsATwoHundred — work that got done is a 2xx, and
+// there was nothing to do counts as done too.
+func TestSuccessOutcome_IsATwoHundred(t *testing.T) {
+	got := SuccessOutcome("the branch was already up to date",
+		map[string]string{"branch": "main"})
+	if !got.Success {
+		t.Error("a success is a success")
 	}
-	if got.Data["reason"] != "nothing_to_commit" {
-		t.Errorf("the reason = %q, want it set", got.Data["reason"])
+	if got.Status != http.StatusOK {
+		t.Errorf("status = %d, want %d", got.Status, http.StatusOK)
 	}
-	if _, ok := got.Data["error"]; ok {
-		t.Errorf("a normal result carries no error description; the data is %v", got.Data)
+	if got.Exception() {
+		t.Error("a success is not an exception")
 	}
-	if got.Data["branch"] != "feat/x" {
+	if got.Data["branch"] != "main" {
 		t.Errorf("the branch = %q, want it kept", got.Data["branch"])
 	}
 }
 
-// TestBranchOutcome_DropsAnErrorFromTheFacts — the constructor owns
-// the error key: a normal branch cannot turn into an exception through
-// the facts it carries.
-func TestBranchOutcome_DropsAnErrorFromTheFacts(t *testing.T) {
-	got := BranchOutcome("pr_exists", "the branch already has an open pull request",
-		map[string]string{"error": "the pull request is already open"})
-	if _, ok := got.Data["error"]; ok {
-		t.Errorf("a normal result carries no error description; the data is %v", got.Data)
-	}
-}
-
-// TestNoopOutcome_CarriesNoErrorDescription — the error key belongs
-// to the exception constructors: a noop outcome never carries one.
-func TestNoopOutcome_CarriesNoErrorDescription(t *testing.T) {
-	got := NoopOutcome("the branch was already up to date",
-		map[string]string{"error": "the branch is behind origin"})
-	if _, ok := got.Data["error"]; ok {
-		t.Errorf("a noop outcome carries no error description; the data is %v", got.Data)
-	}
-	if got.Data["error"] != "" {
-		t.Errorf("the error description = %q, want none", got.Data["error"])
-	}
-}
-
-// TestMerge_AnExceptionSurvivesACleanTurn — the clean turn reports no
-// error description, so the command's reaches the program.
-func TestMerge_AnExceptionSurvivesACleanTurn(t *testing.T) {
-	got := messages.Merge(
-		FailedOutcome("provider_error", "the git host could not be reached"),
-		messages.Outcome{Status: messages.OutcomeOK, Data: map[string]string{"end_reason": "clean"}},
+// TestMerge_AFailureSurvivesACleanTurn — the clean turn reports no
+// failure, so the command's reaches the program.
+func TestMerge_AFailureSurvivesACleanTurn(t *testing.T) {
+	got := outcome.Merge(
+		FailedOutcome(http.StatusServiceUnavailable, "the git host could not be reached"),
+		outcome.Outcome{Success: true, Status: http.StatusOK},
 	)
-	if got.Data["error"] != "the git host could not be reached" {
-		t.Errorf("the error description = %q, want the command's", got.Data["error"])
+	if got.Status != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want the command's", got.Status)
+	}
+	if got.StatusText != "the git host could not be reached" {
+		t.Errorf("the words = %q, want the command's", got.StatusText)
 	}
 }
 
-// TestMerge_TheTurnsExceptionSurvivesANormalBranch — a normal branch
-// reports no error description, so the turn's reaches the program.
-func TestMerge_TheTurnsExceptionSurvivesANormalBranch(t *testing.T) {
-	got := messages.Merge(
-		BranchOutcome("nothing_to_commit", "the worktree has nothing to commit", nil),
-		FailedOutcome("agent_error", "the agent did not commit the work"),
+// TestMerge_TheTurnsFailureSurvivesANormalBranch — a normal branch
+// reports no failure, so the turn's reaches the program.
+func TestMerge_TheTurnsFailureSurvivesANormalBranch(t *testing.T) {
+	got := outcome.Merge(
+		SuccessOutcome("the worktree has nothing to commit", nil),
+		FailedOutcome(http.StatusInternalServerError, "the agent did not commit the work"),
 	)
-	if got.Data["error"] != "the agent did not commit the work" {
-		t.Errorf("the error description = %q, want the turn's", got.Data["error"])
+	if got.Status != http.StatusInternalServerError {
+		t.Errorf("status = %d, want the turn's", got.Status)
+	}
+	if got.StatusText != "the agent did not commit the work" {
+		t.Errorf("the words = %q, want the turn's", got.StatusText)
 	}
 }

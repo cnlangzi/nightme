@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // TestSpec_UsageDescribesTheContinuation: the usage text says what
@@ -333,13 +333,13 @@ func TestReviewContinueOutcome_SpeaksOfContinuedGroups(t *testing.T) {
 	}
 	hold.Release()
 	got := waitOutcome(t, em, 5*time.Second)
-	assertOutcome(t, got, messages.OutcomeIncomplete, map[string]string{
+	assertOutcome(t, got, http.StatusInternalServerError, map[string]string{
 		"continued_groups": "2",
 		"unfinished":       "1",
 		"delivered":        "true",
 	})
-	if got.Summary != "1 of 2 groups unfinished" {
-		t.Errorf("the summary = %q, want %q", got.Summary, "1 of 2 groups unfinished")
+	if got.StatusText != "1 of 2 groups unfinished" {
+		t.Errorf("the summary = %q, want %q", got.StatusText, "1 of 2 groups unfinished")
 	}
 }
 

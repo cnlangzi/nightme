@@ -3,12 +3,13 @@ package me
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -37,8 +38,8 @@ jobs:
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "ok"}},
-		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "ok"}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "ok"}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "ok"}},
 	}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -281,11 +282,8 @@ jobs:
 	if !ok {
 		t.Fatal("the build step has no outcome")
 	}
-	if out.Status != wfe.OutcomeOK {
-		t.Errorf("the build step ended as %q, want ok", out.Status)
-	}
-	if desc := out.Data[wfe.OutcomeKeyError]; desc != "" {
-		t.Errorf("the step carries the error description %q, want none", desc)
+	if out.Status != http.StatusOK {
+		t.Errorf("the build step ended as %d, want %d", out.Status, http.StatusOK)
 	}
 	if out.Exception() {
 		t.Error("a healthy step reads as an exception")

@@ -19,12 +19,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // assignCmdSpec is the argv grammar for /gtw assign.
@@ -112,7 +113,7 @@ func RunAssign(
 	if cs == nil || cs.SelectedCwd() == "" {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ "+command.NoActiveCwdReply,
-			command.FailedOutcome("no_cwd", "the command needs an active workspace")), nil
+			command.FailedOutcome(http.StatusBadRequest, "the command needs an active workspace")), nil
 	}
 
 	target, res := resolveRemoteTarget(ctx, cs, deps, chatID, messageID)
@@ -133,7 +134,7 @@ func RunAssign(
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ Could not ensure gtw labels on %s/%s: %v\n"+
 					"fix the cause and re-run /gtw assign", owner, repo, err),
-				command.FailedOutcome("label_error", "the gtw labels could not be created")), nil
+				command.FailedOutcome(http.StatusServiceUnavailable, "the gtw labels could not be created")), nil
 		}
 		warning = labelCheckWarning(owner, repo, err)
 	}
@@ -143,11 +144,11 @@ func RunAssign(
 		if errors.Is(err, ErrIssueNotFound) {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ Issue #%d not found in %s/%s.", issueID, owner, repo),
-				command.FailedOutcome("issue_not_found", "the issue does not exist")), nil
+				command.FailedOutcome(http.StatusNotFound, "the issue does not exist")), nil
 		}
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ Failed to fetch issue: %v", err),
-			command.FailedOutcome("provider_error", "the issue could not be fetched")), nil
+			command.FailedOutcome(http.StatusServiceUnavailable, "the issue could not be fetched")), nil
 	}
 
 	// What the issue carried before the call. The reply says whether
@@ -158,24 +159,25 @@ func RunAssign(
 		if err := provider.RemoveIssueLabel(ctx, owner, repo, issueID, LabelAssigned); err != nil {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ Failed to remove %s from issue #%d: %v", LabelAssigned, issueID, err),
-				command.FailedOutcome("label_error", "the label could not be removed")), nil
+				command.FailedOutcome(http.StatusServiceUnavailable, "the label could not be removed")), nil
 		}
 	} else {
 		if err := provider.AddIssueLabel(ctx, owner, repo, issueID, LabelAssigned); err != nil {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ Failed to add %s to issue #%d: %v", LabelAssigned, issueID, err),
-				command.FailedOutcome("label_error", "the label could not be added")), nil
+				command.FailedOutcome(http.StatusServiceUnavailable, "the label could not be added")), nil
 		}
 	}
 
 	result := assignResultFor(issueID, remove, had)
-	out := messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: result.summary,
+	out := outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: result.summary,
 		Data: map[string]string{
-			"issue":  strconv.Itoa(issueID),
-			"url":    issue.URL,
-			"action": result.action,
+			KeyIssue:    strconv.Itoa(issueID),
+			KeyIssueURL: issue.URL,
+			KeyAction:   result.action,
 		},
 	}
 	body := renderAssignCard(issue, owner+"/"+repo, result)

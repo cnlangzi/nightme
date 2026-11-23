@@ -177,7 +177,7 @@ AddBlockedBy(ctx context.Context, owner, repo string, id, blocker int) error
 
 **没有可选项时**：回复卡片保留 `❌ No eligible assigned issue` 抬头和队列那一行。队列**一个候选都没有**的时候，卡片补一行说明队列为什么是空的：label catalog 检查刚建出 `nightme/assigned`（或者它本来就在），所以队列要等有人把这个 label 贴到某个 issue 上才有内容 —— `/gtw assign <issue-id>` 就是这一步 —— 而且那个 issue 不能带别的 `nightme/*` label，否则它是被占用的，不入队。队列里有候选但全被跳过时（阻塞 / 已有分支 / 已有 PR）不出现这一行 —— 卡片上写的是它们各自被跳过的原因，贴 label 解决不了那些原因。
 
-**队列里的 issue 全被占用时**：被占用的 issue 仍然带着 `nightme/assigned`，只是被 `nightme/wip` / `nightme/ready` 这类状态 label 挡在候选之外。队列这时是空的，但空的**原因**不是没人贴标签。卡片因此说的是「N 个被占用的 issue 不参与挑选」，`run \`/gtw assign <issue-id>\`` 那一行不出现 —— 标签已经贴在 issue 上了，再贴一个也换不来可选项。outcome 是 `failed`（`reason: no_candidate`）：命令被要求修一个 issue 却没能修，判成失败；`Data` 另外带 `wake_after: "5m"` 和 `candidates` / `held` / `blocked` / `branch_exists` / `pr_open` 五个计数。`wake_after` 是个人 agent 读的契约：它告诉 agent 过一会儿再来挑一次，而不是把这一轮当作结束。
+**队列里的 issue 全被占用时**：被占用的 issue 仍然带着 `nightme/assigned`，只是被 `nightme/wip` / `nightme/ready` 这类状态 label 挡在候选之外。队列这时是空的，但空的**原因**不是没人贴标签。卡片因此说的是「N 个被占用的 issue 不参与挑选」，`run \`/gtw assign <issue-id>\`` 那一行不出现 —— 标签已经贴在 issue 上了，再贴一个也换不来可选项。outcome 是 `200`（**没有** `issue` 键）：队列是空的，这是正常工作流的一个分支，不是失败；`Data` 另外带 `wake_after: "5m"` 和 `candidates` / `held` / `blocked` / `branch_exists` / `pr_open` 五个计数。`wake_after` 是个人 agent 读的契约：它告诉 agent 过一会儿再来挑一次，而不是把这一轮当作结束。
 
 **人点入队 / 出队**：`/gtw assign <issue-id>` 把队列标记贴到 issue 上，`/gtw assign <issue-id> --remove`（或 `-r`）把它摘下来 —— 这是入队唯一的 chat 入口。命令只改这一个 label：不建 worktree、不建分支、不 dispatch agent、不写 `.nightme/gtw.yml`，所以它不占 per-chat run lock、不跑 hooks。argv 是 `/gtw assign <issue-id> [--remove|-r]`，issue id 走 `parseIssueID`（`#42` 与 `42` 都认，只收数字，`0` 不认），多余的位置参数和不认识的 flag 由共享的 lexer 硬拒。命令不看 issue 是开是关、也不看它带不带别的 `nightme/*` label —— 能不能入队是挑选侧（`heldLabel` + 队列过滤）的判断。catalog 检查在改 label 之前跑：加标记时失败即失败，摘标记时失败只警告，摘除照做；label 写不上去报 `reason: label_error`（和 `/gtw fix` 一样）。两个 provider 调用都是幂等的，所以调用无条件发生；卡片区分「贴上了」和「本来就有」，不谎报变化，末行也不许一个不会来的挑选（队列只收 open 的 issue，被别的 `nightme/*` 占住的也不收）。outcome 的 `Data` 带 `issue` / `url` / `action`（`added` 或 `removed`）。
 
@@ -876,7 +876,7 @@ label catalog 检查在 worktree 创建之前跑，所以 `rollbackLabelStep` �
 11. **空 argv / 只传 flag** → `parseFixArgs` 报错"missing argument"
 12. **自动模式** → 挑中最老的可选项；带 `nightme/assigned` 以外的 `nightme/*` label 的、blocker 未落地的、分支本地已存在的、PR 已开的一律跳过
 13. **关系不可用** → 选择继续按年龄，回复说明依赖顺序没有生效
-14. **队列为空** → `failed`（`reason: no_candidate`）+ `wake_after`，不建 worktree、不贴 label
+14. **队列为空** → `200`（没有 `issue` 键）+ `wake_after`，不建 worktree、不贴 label
 15. **具名 fix 撞上被占用的 issue** → `nightme/wip` 走 claim 拒绝（`issue_claimed`），其它状态 label 走「不可用」拒绝（`issue_in_state`），都带 `Data["label"]`，都不建 worktree
 
 ---

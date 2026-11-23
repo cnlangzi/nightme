@@ -3,6 +3,7 @@ package me
 import (
 	"context"
 	"errors"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/command/gtw"
 	mesvc "github.com/cnlangzi/nightme/internal/me"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // fakeController is a scripted personal agent.
@@ -168,7 +170,7 @@ func (r *recordingCh) Send(_ context.Context, m messages.OutboundMessage) (strin
 
 // settled returns the outcome the command reported, or nil when it
 // reported none.
-func (r *recordingCh) settled() *messages.Outcome {
+func (r *recordingCh) settled() *outcome.Outcome {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, m := range r.sends {
@@ -479,11 +481,11 @@ func TestStart_RepliesNothingWhenTheRunStarts(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the command reported no outcome")
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("the outcome is %q, want it ok", outcome.Status)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("the outcome is %d, want it ok", outcome.Status)
 	}
-	if outcome.Summary != "started fix-issue" {
-		t.Errorf("the outcome says %q, want it to name the run", outcome.Summary)
+	if outcome.StatusText != "started fix-issue" {
+		t.Errorf("the outcome says %q, want it to name the run", outcome.StatusText)
 	}
 	for key, want := range map[string]string{"workflow": "fix-issue", "run_id": "run-1"} {
 		if outcome.Data[key] != want {
@@ -599,8 +601,8 @@ func TestStart_TheOutcomeNamesTheWorkflowThatRan(t *testing.T) {
 	if outcome.Data["workflow"] != "nightme/coder" {
 		t.Errorf("the outcome names %q, want nightme/coder", outcome.Data["workflow"])
 	}
-	if !strings.Contains(outcome.Summary, "nightme/coder") {
-		t.Errorf("the summary is %q, want it to name the workflow", outcome.Summary)
+	if !strings.Contains(outcome.StatusText, "nightme/coder") {
+		t.Errorf("the summary is %q, want it to name the workflow", outcome.StatusText)
 	}
 }
 
@@ -658,11 +660,11 @@ func TestPause_PausesTheRun(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command reported no outcome")
 	}
-	if out.Status != messages.OutcomeOK {
-		t.Errorf("the outcome is %q, want it ok", out.Status)
+	if out.Status != http.StatusOK {
+		t.Errorf("the outcome is %d, want it ok", out.Status)
 	}
-	if out.Summary != "the run pauses after the current step" {
-		t.Errorf("the outcome says %q, want it to name the pause", out.Summary)
+	if out.StatusText != "the run pauses after the current step" {
+		t.Errorf("the outcome says %q, want it to name the pause", out.StatusText)
 	}
 }
 
@@ -690,11 +692,11 @@ func TestResume_RunsTheStepAgain(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command reported no outcome")
 	}
-	if out.Status != messages.OutcomeOK {
-		t.Errorf("the outcome is %q, want it ok", out.Status)
+	if out.Status != http.StatusOK {
+		t.Errorf("the outcome is %d, want it ok", out.Status)
 	}
-	if out.Summary != "the step runs again" {
-		t.Errorf("the outcome says %q, want it to name the step", out.Summary)
+	if out.StatusText != "the step runs again" {
+		t.Errorf("the outcome says %q, want it to name the step", out.StatusText)
 	}
 	if out.Data["step"] != "build" {
 		t.Errorf("the outcome names the step %q, want build", out.Data["step"])
@@ -722,11 +724,11 @@ func TestNext_SkipsTheStep(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command reported no outcome")
 	}
-	if out.Status != messages.OutcomeOK {
-		t.Errorf("the outcome is %q, want it ok", out.Status)
+	if out.Status != http.StatusOK {
+		t.Errorf("the outcome is %d, want it ok", out.Status)
 	}
-	if out.Summary != "the step is skipped" {
-		t.Errorf("the outcome says %q, want it to name the step", out.Summary)
+	if out.StatusText != "the step is skipped" {
+		t.Errorf("the outcome says %q, want it to name the step", out.StatusText)
 	}
 	if out.Data["step"] != "build" {
 		t.Errorf("the outcome names the step %q, want build", out.Data["step"])
@@ -748,17 +750,17 @@ func TestResume_ThatDecidesNothingReportsANoop(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command reported no outcome")
 	}
-	if out.Status != messages.OutcomeNoop {
-		t.Errorf("the outcome is %q, want it noop", out.Status)
+	if out.Status != http.StatusOK {
+		t.Errorf("the outcome is %d, want it noop", out.Status)
 	}
-	if out.Summary != "the run's state is shown again" {
-		t.Errorf("the outcome says %q, want it to name the state", out.Summary)
+	if out.StatusText != "the run's state is shown again" {
+		t.Errorf("the outcome says %q, want it to name the state", out.StatusText)
 	}
 	if out.Data["step"] != "build" {
 		t.Errorf("the outcome names the step %q, want build", out.Data["step"])
 	}
-	if _, ok := out.Data["reason"]; ok {
-		t.Errorf("the outcome carries a reason: %v", out.Data)
+	if out.Exception() {
+		t.Errorf("the outcome is a normal branch: %v", out)
 	}
 }
 
@@ -777,17 +779,17 @@ func TestNext_ThatDecidesNothingReportsANoop(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command reported no outcome")
 	}
-	if out.Status != messages.OutcomeNoop {
-		t.Errorf("the outcome is %q, want it noop", out.Status)
+	if out.Status != http.StatusOK {
+		t.Errorf("the outcome is %d, want it noop", out.Status)
 	}
-	if out.Summary != "the run's state is shown again" {
-		t.Errorf("the outcome says %q, want it to name the state", out.Summary)
+	if out.StatusText != "the run's state is shown again" {
+		t.Errorf("the outcome says %q, want it to name the state", out.StatusText)
 	}
 	if out.Data["step"] != "build" {
 		t.Errorf("the outcome names the step %q, want build", out.Data["step"])
 	}
-	if _, ok := out.Data["reason"]; ok {
-		t.Errorf("the outcome carries a reason: %v", out.Data)
+	if out.Exception() {
+		t.Errorf("the outcome is a normal branch: %v", out)
 	}
 }
 
@@ -845,8 +847,8 @@ func TestResume_ReportsTheRefusal(t *testing.T) {
 	if out == nil {
 		t.Fatal("the command reported no outcome")
 	}
-	if out.Data["reason"] != mesvc.ReasonNotPaused {
-		t.Errorf("the reason is %q, want %q", out.Data["reason"], mesvc.ReasonNotPaused)
+	if out.Status != http.StatusConflict {
+		t.Errorf("the status is %d, want %d", out.Status, http.StatusConflict)
 	}
 }
 
@@ -871,11 +873,11 @@ func TestStatus_AsksForTheStateOfTheRun(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the command reported no outcome")
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("the outcome is %q, want it ok", outcome.Status)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("the outcome is %d, want it ok", outcome.Status)
 	}
-	if outcome.Summary != "the run's state is shown again" {
-		t.Errorf("the outcome says %q, want it to name the state", outcome.Summary)
+	if outcome.StatusText != "the run's state is shown again" {
+		t.Errorf("the outcome says %q, want it to name the state", outcome.StatusText)
 	}
 	if len(outcome.Data) != 0 {
 		t.Errorf("the outcome carries %v, want no facts", outcome.Data)
@@ -910,8 +912,8 @@ func TestStatus_InAChatWithoutARun(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the command reported no outcome")
 	}
-	if outcome.Status != messages.OutcomeNoop {
-		t.Errorf("the outcome is %q, want it noop", outcome.Status)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("the outcome is %d, want it noop", outcome.Status)
 	}
 }
 
@@ -969,8 +971,8 @@ func TestStop_InAChatWithoutARun(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the command reported no outcome")
 	}
-	if outcome.Status != messages.OutcomeFailed {
-		t.Errorf("the outcome is %q, want it failed", outcome.Status)
+	if outcome.Status != http.StatusInternalServerError {
+		t.Errorf("the outcome is %d, want it failed", outcome.Status)
 	}
 }
 
@@ -994,11 +996,8 @@ func TestStatus_ReportsWhyTheAgentIsOff(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("the command reported no outcome")
 	}
-	if outcome.Status != messages.OutcomeFailed {
-		t.Errorf("the outcome is %q, want it failed", outcome.Status)
-	}
-	if outcome.Data["reason"] != "no_agent" {
-		t.Errorf("the reason is %q, want it no_agent", outcome.Data["reason"])
+	if outcome.Status != http.StatusBadRequest {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusBadRequest)
 	}
 }
 

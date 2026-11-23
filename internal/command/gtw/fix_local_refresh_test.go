@@ -11,14 +11,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // localFixGit is a scripted GitRunner: it answers the git calls the
@@ -260,7 +259,7 @@ func TestFixLocal_RefreshRefusalEndsCommand(t *testing.T) {
 
 			// The outcome is a failure.
 			got := p.settle(t)
-			assertOutcome(t, got, messages.OutcomeFailed, map[string]string{"reason": "error"})
+			assertOutcome(t, got, http.StatusInternalServerError, nil)
 
 			// No worktree was created.
 			if i := git.callIndex("worktree", "add"); i >= 0 {

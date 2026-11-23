@@ -1,8 +1,11 @@
 package wfe
 
 import (
+	"net/http"
 	"testing"
 	"time"
+
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // newRunState builds a fresh run state for a workflow.
@@ -51,7 +54,7 @@ func TestDecide_FirstStepRunsOnTheFastPath(t *testing.T) {
 func TestDecide_NextStepFollowsTheOkOutcome(t *testing.T) {
 	wf := mustParse(t, threeStepYAML)
 	state := newRunState(wf)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeOK}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{Success: true, Status: http.StatusOK}, false)
 
 	decision, err := Decide(state, wf)
 	if err != nil {
@@ -68,7 +71,7 @@ func TestDecide_NextStepFollowsTheOkOutcome(t *testing.T) {
 func TestDecide_ANonOkOutcomeIsAJudgmentPoint(t *testing.T) {
 	wf := mustParse(t, threeStepYAML)
 	state := newRunState(wf)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeIncomplete}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{Success: false, Status: http.StatusInternalServerError}, false)
 
 	decision, err := Decide(state, wf)
 	if err != nil {
@@ -88,7 +91,7 @@ func TestDecide_ANonOkOutcomeIsAJudgmentPoint(t *testing.T) {
 func TestDecide_ANoopOutcomeKeepsTheFastPath(t *testing.T) {
 	wf := mustParse(t, threeStepYAML)
 	state := newRunState(wf)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeNoop}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{Success: true, Status: http.StatusOK}, false)
 
 	decision, err := Decide(state, wf)
 	if err != nil {
@@ -104,7 +107,7 @@ func TestDecide_ThePlanIsExhausted(t *testing.T) {
 	state := newRunState(wf)
 	job := wf.Jobs["main"]
 	for _, step := range job.Steps {
-		RecordStep(state, "main", step, Outcome{Status: OutcomeOK}, false)
+		RecordStep(state, "main", step, outcome.Outcome{Success: true, Status: http.StatusOK}, false)
 	}
 
 	decision, err := Decide(state, wf)
@@ -167,7 +170,7 @@ jobs:
 	if decision.Kind != DecisionRun || decision.Step.ID != "build1" {
 		t.Fatalf("the first job should run first, got %v (%q)", decision.Kind, decision.Reason)
 	}
-	RecordStep(state, "build", wf.Jobs["build"].Steps[0], Outcome{Status: OutcomeOK}, false)
+	RecordStep(state, "build", wf.Jobs["build"].Steps[0], outcome.Outcome{Success: true, Status: http.StatusOK}, false)
 
 	decision, err = Decide(state, wf)
 	if err != nil {
@@ -226,7 +229,7 @@ jobs:
 func TestDecide_AnEmptyConditionHolds(t *testing.T) {
 	wf := mustParse(t, threeStepYAML)
 	state := newRunState(wf)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeOK}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{Success: true, Status: http.StatusOK}, false)
 
 	decision, err := Decide(state, wf)
 	if err != nil {
@@ -287,12 +290,12 @@ jobs:
 func TestDecide_TheEmptyQueueSkipsTheGuardedStepsAndStartsTheNextRound(t *testing.T) {
 	wf := mustParse(t, fixWorkflowYAML)
 	state := newRunState(wf)
-	RecordStep(state, "ship", *StepByID(wf, "wait"), Outcome{Status: OutcomeOK}, false)
+	RecordStep(state, "ship", *StepByID(wf, "wait"), outcome.Outcome{Success: true, Status: http.StatusOK}, false)
 	// The empty queue: a normal branch — no issue fact, no error.
-	RecordStep(state, "ship", *StepByID(wf, "fix"), Outcome{
-		Status:  OutcomeFailed,
-		Summary: "no assigned issue was eligible",
-		Data:    map[string]string{"reason": "no_candidate"},
+	RecordStep(state, "ship", *StepByID(wf, "fix"), outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "no assigned issue was eligible",
 	}, false)
 
 	decision, err := Decide(state, wf)
@@ -317,10 +320,10 @@ func TestDecide_TheEmptyQueueSkipsTheGuardedStepsAndStartsTheNextRound(t *testin
 func TestDecide_TheEmptyQueueLeavesTheWaitStepAsTheRestOfTheRound(t *testing.T) {
 	wf := mustParse(t, fixWorkflowFinalWaitYAML)
 	state := newRunState(wf)
-	RecordStep(state, "ship", *StepByID(wf, "fix"), Outcome{
-		Status:  OutcomeFailed,
-		Summary: "no assigned issue was eligible",
-		Data:    map[string]string{"reason": "no_candidate"},
+	RecordStep(state, "ship", *StepByID(wf, "fix"), outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "no assigned issue was eligible",
 	}, false)
 
 	decision, err := Decide(state, wf)
@@ -350,11 +353,12 @@ func TestDecide_TheEmptyQueueLeavesTheWaitStepAsTheRestOfTheRound(t *testing.T) 
 func TestDecide_TheGuardedStepsRunWhenAnIssueWasPicked(t *testing.T) {
 	wf := mustParse(t, fixWorkflowYAML)
 	state := newRunState(wf)
-	RecordStep(state, "ship", *StepByID(wf, "wait"), Outcome{Status: OutcomeOK}, false)
-	RecordStep(state, "ship", *StepByID(wf, "fix"), Outcome{
-		Status:  OutcomeOK,
-		Summary: "the work is ready",
-		Data:    map[string]string{"issue": "42"},
+	RecordStep(state, "ship", *StepByID(wf, "wait"), outcome.Outcome{Success: true, Status: http.StatusOK}, false)
+	RecordStep(state, "ship", *StepByID(wf, "fix"), outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the work is ready",
+		Data:       map[string]string{"issue": "42"},
 	}, false)
 
 	decision, err := Decide(state, wf)
@@ -382,9 +386,10 @@ jobs:
         message: "/next"
 `)
 	state := newRunState(wf)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{
-		Status: OutcomeFailed,
-		Data:   map[string]string{"error": "the worktree could not be created"},
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{
+		Success: false,
+		Status:  http.StatusInternalServerError,
+		Data:    map[string]string{"error": "the worktree could not be created"},
 	}, false)
 
 	decision, err := Decide(state, wf)
@@ -420,8 +425,8 @@ jobs:
 func TestDecide_AFinalStepRunsInTheOrdinaryOrder(t *testing.T) {
 	wf := mustParse(t, finalStepYAML)
 	state := newRunState(wf)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeOK}, false)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[1], Outcome{Status: OutcomeOK}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{Success: true, Status: http.StatusOK}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[1], outcome.Outcome{Success: true, Status: http.StatusOK}, false)
 
 	decision, err := Decide(state, wf)
 	if err != nil {
@@ -438,9 +443,10 @@ func TestDecide_AFinalStepRunsInTheOrdinaryOrder(t *testing.T) {
 func TestEndRound_SkipsTheRemainingStepsAndRunsTheFinalStep(t *testing.T) {
 	wf := mustParse(t, finalStepYAML)
 	state := newRunState(wf)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{
-		Status:  OutcomeFailed,
-		Summary: "the worktree has nothing to commit",
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the worktree has nothing to commit",
 	}, false)
 
 	if err := EndRound(state, wf, "main"); err != nil {
@@ -485,7 +491,7 @@ jobs:
         final: true
 `)
 	state := newRunState(wf)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeFailed}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{Success: false, Status: http.StatusInternalServerError}, false)
 
 	if err := EndRound(state, wf, "main"); err != nil {
 		t.Fatalf("EndRound: %v", err)
@@ -497,7 +503,7 @@ jobs:
 	if decision.Kind != DecisionRun || decision.Step.ID != "cleanup" {
 		t.Fatalf("the final step should run now, got %v (%q)", decision.Kind, decision.Reason)
 	}
-	RecordStep(state, "main", wf.Jobs["main"].Steps[1], Outcome{Status: OutcomeOK}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[1], outcome.Outcome{Success: true, Status: http.StatusOK}, false)
 
 	decision, err = Decide(state, wf)
 	if err != nil {
@@ -527,7 +533,7 @@ jobs:
         message: "/two"
 `)
 	state := newRunState(wf)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeFailed}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{Success: false, Status: http.StatusInternalServerError}, false)
 
 	if err := EndRound(state, wf, "main"); err != nil {
 		t.Fatalf("EndRound: %v", err)
@@ -549,7 +555,7 @@ jobs:
 func TestEndRound_AFailedFinalStepIsAJudgmentPoint(t *testing.T) {
 	wf := mustParse(t, finalStepYAML)
 	state := newRunState(wf)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeFailed}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{Success: false, Status: http.StatusInternalServerError}, false)
 
 	if err := EndRound(state, wf, "main"); err != nil {
 		t.Fatalf("EndRound: %v", err)
@@ -561,7 +567,7 @@ func TestEndRound_AFailedFinalStepIsAJudgmentPoint(t *testing.T) {
 	if decision.Kind != DecisionRun || decision.Step.ID != "cleanup" {
 		t.Fatalf("the final step should run now, got %v (%q)", decision.Kind, decision.Reason)
 	}
-	RecordStep(state, "main", wf.Jobs["main"].Steps[2], Outcome{Status: OutcomeFailed}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[2], outcome.Outcome{Success: false, Status: http.StatusInternalServerError}, false)
 
 	decision, err = Decide(state, wf)
 	if err != nil {
@@ -577,7 +583,7 @@ func TestEndRound_AFailedFinalStepIsAJudgmentPoint(t *testing.T) {
 func TestEndRound_TheLastRoundOfAJobExhaustsThePlan(t *testing.T) {
 	wf := mustParse(t, threeStepYAML)
 	state := newRunState(wf)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeFailed}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{Success: false, Status: http.StatusInternalServerError}, false)
 
 	if err := EndRound(state, wf, "main"); err != nil {
 		t.Fatalf("EndRound: %v", err)
@@ -624,7 +630,7 @@ jobs:
         message: "/last"
 `)
 	state := newRunState(wf)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeFailed}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{Success: false, Status: http.StatusInternalServerError}, false)
 
 	if err := EndRound(state, wf, "main"); err != nil {
 		t.Fatalf("EndRound: %v", err)
@@ -651,24 +657,33 @@ func stepState(state *RunState, id string) (StepState, bool) {
 func TestExprContext_CarriesTheStepOutcomes(t *testing.T) {
 	wf := mustParse(t, threeStepYAML)
 	state := newRunState(wf)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{
-		Status:  OutcomeOK,
-		Summary: "done",
-		Data:    map[string]string{"issue": "42"},
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "done",
+		Data:       map[string]string{"issue": "42"},
 	}, false)
 
 	ec := ExprContext(state)
-	got := EvalString("${{ steps.one.outputs.status }}", ec)
-	if got != "ok" {
-		t.Errorf("status = %q, want ok", got)
+	got := EvalString("${{ steps.one.outputs.success }}", ec)
+	if got != "true" {
+		t.Errorf("success = %q, want true", got)
+	}
+	got = EvalString("${{ steps.one.outputs.status }}", ec)
+	if got != "200" {
+		t.Errorf("status = %q, want 200", got)
+	}
+	got = EvalString("${{ steps.one.outputs.statusText }}", ec)
+	if got != "done" {
+		t.Errorf("statusText = %q, want done", got)
 	}
 	got = EvalString("${{ steps.one.outputs.data.issue }}", ec)
 	if got != "42" {
 		t.Errorf("data.issue = %q, want 42", got)
 	}
-	got = EvalString("${{ needs.main.outputs.summary }}", ec)
+	got = EvalString("${{ needs.main.outputs.statusText }}", ec)
 	if got != "done" {
-		t.Errorf("needs.main summary = %q, want done", got)
+		t.Errorf("needs.main statusText = %q, want done", got)
 	}
 }
 
@@ -678,7 +693,7 @@ func TestExprContext_CarriesTheStepOutcomes(t *testing.T) {
 func TestEndRound_ARoundThatIsAlreadyOverIsRefused(t *testing.T) {
 	wf := mustParse(t, finalStepYAML)
 	state := newRunState(wf)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeFailed}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{Success: false, Status: http.StatusInternalServerError}, false)
 
 	if err := EndRound(state, wf, "main"); err != nil {
 		t.Fatalf("EndRound: %v", err)

@@ -13,6 +13,7 @@ package gtw
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // outcomeProbe runs a command against a chat session and reads the
@@ -51,12 +53,12 @@ func newOutcomeProbe(t *testing.T) *outcomeProbe {
 
 // settle releases the message's work — the dispatcher does it when
 // the command returns — and returns the outcome that went out.
-func (p *outcomeProbe) settle(t *testing.T) *messages.Outcome {
+func (p *outcomeProbe) settle(t *testing.T) *outcome.Outcome {
 	t.Helper()
 	p.work.Release()
 	p.ch.mu.Lock()
 	defer p.ch.mu.Unlock()
-	var out *messages.Outcome
+	var out *outcome.Outcome
 	for _, m := range p.ch.sends {
 		if m.Kind != messages.OutMessageSettled {
 			continue
@@ -72,13 +74,13 @@ func (p *outcomeProbe) settle(t *testing.T) *messages.Outcome {
 // assertOutcome checks the status and the Data keys a command
 // reported. A missing report fails the test — that is the whole
 // point of the probe.
-func assertOutcome(t *testing.T, got *messages.Outcome, want messages.OutcomeStatus, wantData map[string]string) {
+func assertOutcome(t *testing.T, got *outcome.Outcome, want int, wantData map[string]string) {
 	t.Helper()
 	if got == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
 	if got.Status != want {
-		t.Fatalf("outcome status = %s, want %s (outcome %+v)", got.Status, want, got)
+		t.Fatalf("outcome status = %d, want %d (outcome %+v)", got.Status, want, got)
 	}
 	for k, v := range wantData {
 		if got.Data[k] != v {
@@ -113,7 +115,7 @@ func TestGtwOutcome_Usage(t *testing.T) {
 				t.Fatalf("Handle: %v", err)
 			}
 			got := p.settle(t)
-			assertOutcome(t, got, messages.OutcomeFailed, map[string]string{"reason": tc.want})
+			assertOutcome(t, got, http.StatusBadRequest, nil)
 		})
 	}
 }
@@ -133,7 +135,7 @@ func TestGtwOutcome_AbortNothingRunning(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeNoop, nil)
+	assertOutcome(t, got, http.StatusOK, nil)
 }
 
 // TestGtwOutcome_Push covers the /gtw push exit paths a program
@@ -157,7 +159,7 @@ func TestGtwOutcome_Push(t *testing.T) {
 		if _, err := dispatchPush(p.ctx, p.cs, HandlerDeps{Git: git}, "chat", "msg", pushArgs{}); err != nil {
 			t.Fatalf("dispatchPush: %v", err)
 		}
-		assertOutcome(t, p.settle(t), messages.OutcomeFailed, map[string]string{"reason": "dirty"})
+		assertOutcome(t, p.settle(t), http.StatusConflict, nil)
 	})
 
 	t.Run("detached", func(t *testing.T) {
@@ -176,7 +178,7 @@ func TestGtwOutcome_Push(t *testing.T) {
 		if _, err := dispatchPush(p.ctx, p.cs, HandlerDeps{Git: git}, "chat", "msg", pushArgs{}); err != nil {
 			t.Fatalf("dispatchPush: %v", err)
 		}
-		assertOutcome(t, p.settle(t), messages.OutcomeFailed, map[string]string{"reason": "detached"})
+		assertOutcome(t, p.settle(t), http.StatusConflict, nil)
 	})
 
 	t.Run("nothing to push", func(t *testing.T) {
@@ -200,10 +202,7 @@ func TestGtwOutcome_Push(t *testing.T) {
 			t.Fatalf("dispatchPush: %v", err)
 		}
 		got := p.settle(t)
-		assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
-			"reason": "nothing_to_push",
-			"branch": "wt-clean",
-		})
+		assertOutcome(t, got, http.StatusOK, map[string]string{"branch": "wt-clean"})
 		assertNoError(t, got)
 	})
 
@@ -238,7 +237,7 @@ func TestGtwOutcome_Push(t *testing.T) {
 			t.Fatalf("dispatchPush: %v", err)
 		}
 		got := p.settle(t)
-		assertOutcome(t, got, messages.OutcomeOK, map[string]string{
+		assertOutcome(t, got, http.StatusOK, map[string]string{
 			"branch":      "wt-pushed",
 			"commits":     "2",
 			"remote_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -281,10 +280,7 @@ func TestGtwOutcome_Push(t *testing.T) {
 		}
 		card := p.ch.lastText()
 		got := p.settle(t)
-		assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
-			"reason": "nothing_to_push",
-			"branch": "wt-pushed",
-		})
+		assertOutcome(t, got, http.StatusConflict, map[string]string{"branch": "wt-pushed"})
 		assertError(t, got)
 		if !strings.Contains(card, "nothing to push") {
 			t.Errorf("the card must read like the status:\n%s", card)
@@ -311,10 +307,7 @@ func TestGtwOutcome_CommitNothingToDo(t *testing.T) {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
-		"reason": "nothing_to_commit",
-		"branch": "wt-clean",
-	})
+	assertOutcome(t, got, http.StatusInternalServerError, map[string]string{"branch": "wt-clean"})
 	assertError(t, got)
 }
 
@@ -338,9 +331,9 @@ func TestGtwOutcome_SyncUpToDate(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeOK, map[string]string{"branch": "main"})
-	if got != nil && got.Summary != "the branch was already up to date" {
-		t.Errorf("outcome summary = %q, want %q", got.Summary, "the branch was already up to date")
+	assertOutcome(t, got, http.StatusOK, map[string]string{"branch": "main"})
+	if got != nil && got.StatusText != "the branch was already up to date" {
+		t.Errorf("outcome summary = %q, want %q", got.StatusText, "the branch was already up to date")
 	}
 	// The card reads like the status: the sync did what it was asked
 	// to do.
@@ -364,7 +357,7 @@ func TestGtwOutcome_ConfigQuery(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeNoop, nil)
+	assertOutcome(t, got, http.StatusOK, nil)
 	if got.Data["scope"] == "" {
 		t.Errorf("outcome data = %v, want a scope", got.Data)
 	}
@@ -389,7 +382,7 @@ func TestGtwOutcome_ConfigWrite(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeOK, map[string]string{
+	assertOutcome(t, got, http.StatusOK, map[string]string{
 		"lang":  "English",
 		"scope": "global",
 	})
@@ -417,7 +410,7 @@ func TestGtwOutcome_ReportHappensOnce(t *testing.T) {
 	if got == nil {
 		t.Fatal("no settled outcome")
 	}
-	if strings.TrimSpace(got.Summary) == "" {
+	if strings.TrimSpace(got.StatusText) == "" {
 		t.Error("outcome summary is empty; every outcome names what happened")
 	}
 }
@@ -447,7 +440,7 @@ func TestGtwOutcome_NewCreatePartial(t *testing.T) {
 	if !strings.HasPrefix(card, "⚠️") {
 		t.Fatalf("card = %q, want a partial-success card", card)
 	}
-	if outcome.Status != messages.OutcomeIncomplete {
+	if outcome.Status != http.StatusInternalServerError {
 		t.Fatalf("outcome = %+v, want incomplete — the card says ⚠️", outcome)
 	}
 	if outcome.Data["issues"] != "42" {
@@ -469,32 +462,33 @@ func TestGtwOutcome_AbortedRunKeepsItsFacts(t *testing.T) {
 	cancel(ErrAborted)
 
 	// The failure the cancellation caused: dropped.
-	reportOutcome(ctx, command.FailedOutcome("rejected", "the push was rejected"))
+	reportOutcome(ctx, command.FailedOutcome(http.StatusConflict, "the push was rejected"))
 	// The work the run did before the cancellation: kept.
-	reportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeIncomplete,
-		Summary: "the worktree was closed but the sync failed",
-		Data:    map[string]string{"branch": "feat/x", "worktree": "/tmp/wt"},
+	reportOutcome(ctx, outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the worktree was closed but the sync failed",
+		Data:       map[string]string{"branch": "feat/x", "worktree": "/tmp/wt"},
 	})
 	// The cancellation itself.
-	chatsession.ReportOutcome(p.ctx, messages.Outcome{
-		Status:  messages.OutcomeCancelled,
-		Summary: "the command was cancelled by /gtw abort",
-		Data:    map[string]string{"reason": "aborted"},
+	chatsession.ReportOutcome(p.ctx, outcome.Outcome{
+		Success:    false,
+		Status:     outcome.StatusClientClosedRequest,
+		StatusText: "the command was cancelled by /gtw abort",
 	})
 
 	got := p.settle(t)
 	if got == nil {
 		t.Fatal("no settled outcome")
 	}
-	if got.Status != messages.OutcomeCancelled {
+	if got.Status != outcome.StatusClientClosedRequest {
 		t.Fatalf("outcome = %+v, want cancelled", got)
 	}
 	if got.Data["branch"] != "feat/x" {
 		t.Errorf("outcome data = %v, want the branch the run worked on", got.Data)
 	}
-	if got.Data["reason"] == "rejected" {
-		t.Errorf("outcome data = %v, want the cancellation's reason, not the failure's", got.Data)
+	if got.Status == http.StatusConflict {
+		t.Errorf("the outcome is a failure (%d), want the cancellation", got.Status)
 	}
 }
 
@@ -530,8 +524,8 @@ func TestGtwOutcome_PushUnreadableRangeIsSurfaced(t *testing.T) {
 		t.Fatalf("dispatchPush: %v", err)
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{"reason": "error"})
-	if got != nil && got.Summary != "the push landed but its result could not be read" {
-		t.Errorf("outcome summary = %q, want the push's result to be reported as unread", got.Summary)
+	assertOutcome(t, got, http.StatusInternalServerError, nil)
+	if got != nil && got.StatusText != "the push landed but its result could not be read" {
+		t.Errorf("outcome summary = %q, want the push's result to be reported as unread", got.StatusText)
 	}
 }

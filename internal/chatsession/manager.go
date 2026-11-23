@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatstore"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/registry"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // Manager owns the per-chat ChatSession table. Safe for concurrent
@@ -553,10 +555,10 @@ func (m *Manager) HandleInbound(ctx context.Context, msg *messages.InboundMessag
 		// never come.
 		if cs != nil {
 			w := cs.Hold(msg.MessageID)
-			w.Report(messages.Outcome{
-				Status:  messages.OutcomeNoop,
-				Summary: "message not addressed to the bot",
-				Data:    map[string]string{"reason": "watch_mode"},
+			w.Report(outcome.Outcome{
+				Success:    true,
+				Status:     http.StatusOK,
+				StatusText: "message not addressed to the bot",
 			})
 			w.Release()
 		}
@@ -593,13 +595,14 @@ func (m *Manager) HandleInbound(ctx context.Context, msg *messages.InboundMessag
 		// failed so a program waiting on the message learns that
 		// instead of waiting forever.
 		w := cs.Hold(userMsgID)
-		w.Report(messages.Outcome{
-			Status:  messages.OutcomeFailed,
-			Summary: err.Error(),
-			Data: map[string]string{
-				"reason":                 "no_agent",
-				messages.OutcomeKeyError: err.Error(),
-			},
+		status := http.StatusInternalServerError
+		if errors.Is(err, ErrNoSelectedCwd) {
+			status = http.StatusBadRequest
+		}
+		w.Report(outcome.Outcome{
+			Success:    false,
+			Status:     status,
+			StatusText: err.Error(),
 		})
 		w.Release()
 		if errors.Is(err, ErrNoSelectedCwd) {

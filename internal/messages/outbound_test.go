@@ -71,3 +71,10 @@ func TestOutboundMessage_HeartbeatFieldRoundtrip(t *testing.T) {
 		t.Fatal("populated snapshot reported Empty()=true")
 	}
 }
+
+// TestOutboundKind_Settled pins the wire name of the settled kind.
+func TestOutboundKind_Settled(t *testing.T) {
+	if got := OutMessageSettled.String(); got != "message_settled" {
+		t.Fatalf("OutMessageSettled.String() = %q, want %q", got, "message_settled")
+	}
+}

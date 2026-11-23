@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // The automatic mode of `/gtw fix`: the user names no issue, so
@@ -321,16 +321,16 @@ func renderAutoNoCandidate(sel *autoSelection, labelNote string) string {
 // and there was none to fix — carrying the counters and the wake-up
 // hint.
 //
-// No error description rides along: nothing broke, the queue was
-// simply empty.
-func autoNoCandidateOutcome(sel *autoSelection) messages.Outcome {
-	return command.BranchOutcome("no_candidate", "no assigned issue was eligible",
+// The status is a success: nothing broke, the queue was simply
+// empty. The counters say how the queue looked.
+func autoNoCandidateOutcome(sel *autoSelection) outcome.Outcome {
+	return command.SuccessOutcome("no assigned issue was eligible",
 		map[string]string{
-			"wake_after":    autoWakeAfter,
-			"candidates":    strconv.Itoa(sel.Counters.Candidates),
-			"held":          strconv.Itoa(sel.Counters.Held),
-			"blocked":       strconv.Itoa(sel.Counters.Blocked),
-			"branch_exists": strconv.Itoa(sel.Counters.BranchExists),
-			"pr_open":       strconv.Itoa(sel.Counters.PROpen),
+			KeyWakeAfter:    autoWakeAfter,
+			KeyCandidates:   strconv.Itoa(sel.Counters.Candidates),
+			KeyHeld:         strconv.Itoa(sel.Counters.Held),
+			KeyBlocked:      strconv.Itoa(sel.Counters.Blocked),
+			KeyBranchExists: strconv.Itoa(sel.Counters.BranchExists),
+			KeyPROpen:       strconv.Itoa(sel.Counters.PROpen),
 		})
 }

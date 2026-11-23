@@ -4,17 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // stepVerdict is what a step produced.
 type stepVerdict struct {
 	// Outcome is the verdict of the step.
-	Outcome wfe.Outcome
+	Outcome outcome.Outcome
 	// Settled is false while the step is still running: it has no
 	// verdict yet, so the run state must not record it.
 	Settled bool
@@ -207,7 +209,7 @@ func (s *Service) runAttempts(ctx context.Context, r *run, job string, step wfe.
 				"agent", a.agent,
 				"next_agent", agents[i+1].agent,
 				"status", v.Outcome.Status,
-				"summary", v.Outcome.Summary)
+				"summary", v.Outcome.StatusText)
 		}
 		unfinished = unfinishedCount(v.Outcome)
 	}
@@ -226,8 +228,8 @@ func (s *Service) runAttempts(ctx context.Context, r *run, job string, step wfe.
 // part of its work says how much of it is left. An outcome without
 // the count leaves nothing behind — the next agent runs the whole
 // thing again.
-func unfinishedCount(out wfe.Outcome) int {
-	n, err := strconv.Atoi(out.Data[wfe.OutcomeKeyUnfinished])
+func unfinishedCount(out outcome.Outcome) int {
+	n, err := strconv.Atoi(out.Data[KeyUnfinished])
 	if err != nil || n < 0 {
 		return 0
 	}
@@ -269,26 +271,21 @@ func (s *Service) runAttempt(ctx context.Context, r *run, job string, step wfe.S
 		// chain moves on.
 		return breakAttempt(err), stepResult{}, nil
 	}
-	if res.Status == statusAbandoned || r.stepSkipped(step.ID) {
+	if res.phase == phaseAbandoned || r.stepSkipped(step.ID) {
 		// The step was passed over while its command was in flight: the
 		// verdict that comes late does not put it back into the plan.
 		// The step has no verdict of its own, and the run goes on to its
 		// next step.
-		return stepVerdict{Outcome: wfe.Outcome{Status: wfe.OutcomeUnknown, Summary: res.Summary}}, res, nil
+		return stepVerdict{Outcome: noVerdict(res.StatusText)}, res, nil
 	}
-	if res.Status == statusWaiting {
+	if res.phase == phaseWaiting {
 		// The command is still running: it has no verdict yet, so the
 		// run state records the step as pending and the agent decides
 		// what to do about it.
 		r.recordPending(job, step)
-		return stepVerdict{Outcome: wfe.Outcome{Status: wfe.OutcomeUnknown, Summary: res.Summary}}, res, nil
+		return stepVerdict{Outcome: noVerdict(res.StatusText)}, res, nil
 	}
-	out := wfe.Outcome{
-		Status:  outcomeStatus(res.Status),
-		Summary: res.Summary,
-		Data:    res.Data,
-	}
-	return stepVerdict{Outcome: out, Settled: true, Transcript: res.Transcript}, res, nil
+	return stepVerdict{Outcome: res.Outcome, Settled: true, Transcript: res.Transcript}, res, nil
 }
 
 // breakAttempt returns the verdict of an attempt that could not run.
@@ -321,8 +318,8 @@ func (s *Service) switchAgent(r *run, step wfe.Step, a attempt) (func(), error) 
 // The exception axis is what tells a normal result from a breakage. A
 // cancelled outcome ends the chain instead: the run is stopping, and
 // another agent would run work nobody asked for.
-func fallsThrough(out wfe.Outcome) bool {
-	if out.Status == wfe.OutcomeCancelled {
+func fallsThrough(out outcome.Outcome) bool {
+	if out.Status == outcome.StatusClientClosedRequest {
 		return false
 	}
 	return out.Exception()
@@ -375,10 +372,10 @@ func (s *Service) executeShell(ctx context.Context, r *run, job string, step wfe
 		// The run was cancelled: the step has no verdict of its own.
 		return stepVerdict{}, execCtx.Err()
 	}
-	out := wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the shell command ran"}
+	out := outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "the shell command ran"}
 	if res != nil {
 		out.Data = shellOutputs(res)
-		out.Summary = fmt.Sprintf("the shell command exited with %d", res.ExitCode)
+		out.StatusText = fmt.Sprintf("the shell command exited with %d", res.ExitCode)
 	}
 	if err != nil {
 		summary := err.Error()
@@ -455,7 +452,6 @@ func shellOutputs(res *wfe.ShellResult) map[string]string {
 	for k, v := range res.Outputs {
 		out[k] = v
 	}
-	delete(out, wfe.OutcomeKeyError)
 	out["exit_code"] = strconv.Itoa(res.ExitCode)
 	out["stdout"] = truncate(res.Stdout, maxShellOutput)
 	out["stderr"] = truncate(res.Stderr, maxShellOutput)
@@ -474,7 +470,7 @@ func (s *Service) executeWait(ctx context.Context, r *run, job string, step wfe.
 	if err := waitFor(ctx, r, d); err != nil {
 		return stepVerdict{}, err
 	}
-	out := wfe.Outcome{Status: wfe.OutcomeOK, Summary: "waited " + d.String()}
+	out := outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "waited " + d.String()}
 	r.record(wfe.ActionKindRun, "wait "+d.String(), step.ID, out)
 	s.refreshRun(r)
 	return stepVerdict{Outcome: out, Settled: true}, nil
@@ -503,7 +499,7 @@ func (s *Service) executeUse(ctx context.Context, r *run, job string, step wfe.S
 	if res != nil {
 		data = stringifyAnyMap(res.Outputs)
 	}
-	out := wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the action " + name + " ran", Data: data}
+	out := outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "the action " + name + " ran", Data: data}
 	if err != nil {
 		out = failedOutcome(err.Error(), data)
 	}
@@ -547,7 +543,6 @@ func stringifyAnyMap(m map[string]any) map[string]string {
 			out[k] = fmt.Sprintf("%v", v)
 		}
 	}
-	delete(out, wfe.OutcomeKeyError)
 	return out
 }
 

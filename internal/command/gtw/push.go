@@ -3,10 +3,11 @@ package gtw
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // pushFallback judges a push that moved no commit.
@@ -21,24 +22,24 @@ import (
 // A branch the remote holds is a normal branch: there was nothing
 // to push. A branch the remote does not hold is an exception: the
 // local still carries commits the remote does not have.
-func pushFallback(ctx context.Context, c Context, branch string, deps HandlerDeps) (string, messages.Outcome) {
+func pushFallback(ctx context.Context, c Context, branch string, deps HandlerDeps) (string, outcome.Outcome) {
 	missing, err := commitsMissingFromRemote(ctx, c.Worktree, branch, deps)
 	if err != nil {
 		return nothingToPushCard(branch),
-			command.FailedOutcomeData("nothing_to_push", "the branch has nothing to push",
-				map[string]string{"branch": branch},
-				"the push moved no commit and the remote's tip could not be read: "+err.Error())
+			command.FailedOutcomeData(http.StatusInternalServerError,
+				"the push moved no commit and the remote's tip could not be read: "+err.Error(),
+				map[string]string{KeyBranch: branch})
 	}
 	if missing == 0 {
 		return alreadyPushedCard(branch),
-			command.BranchOutcome("nothing_to_push", "the branch is already on the remote",
-				map[string]string{"branch": branch})
+			command.SuccessOutcome("the branch is already on the remote",
+				map[string]string{KeyBranch: branch, KeyCommits: "0"})
 	}
 	return nothingToPushCard(branch),
-		command.FailedOutcomeData("nothing_to_push", "the branch has nothing to push",
-			map[string]string{"branch": branch},
+		command.FailedOutcomeData(http.StatusConflict,
 			fmt.Sprintf("the push moved no commit and %s still carries %d commit(s) origin/%s does not have",
-				branch, missing, branch))
+				branch, missing, branch),
+			map[string]string{KeyBranch: branch})
 }
 
 // headSHA returns the current HEAD's full SHA in worktree.

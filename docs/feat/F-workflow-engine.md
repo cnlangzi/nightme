@@ -139,7 +139,7 @@ type RunState struct {
 
 `StepState` 记每一个跑过的 step：它的 `ID`、所属的 `Job`、第几 `Round`、`Outcome`，以及两个标志——`Skipped`（`if:` 不成立）、`Pending`（开始了但还没落定）。
 
-`Outcome` 是 step 的裁决：`Status` 是 `ok` / `noop` / `incomplete` / `failed` / `cancelled` / `timeout` / `unknown`，`Summary` 是一句话，`Data` 是事实。`Data["error"]`（`OutcomeKeyError`）是错误描述——**plan 靠它区分"正常结果"和"异常"**，状态本身不说：一个因为"有活儿要干"才跑起来的命令可能什么都没做就报了 `failed`。
+`Outcome` 是 step 的裁决：`Status` 是 HTTP 状态码，`StatusText` 是一句话，`Data` 是事实。**plan 靠 `Status` 的类别区分"正常结果"和"异常"**：`2xx` 是正常结果，`4xx` 与 `5xx` 是异常。一个因为"有活儿要干"才跑起来的命令可能什么都没做就报了 `2xx`——是哪种情况由 `Data` 里的事实说明（没有 `issue` 键，或者 `commits=0`）。
 
 ### 3.2 Loader（`load.go`）
 

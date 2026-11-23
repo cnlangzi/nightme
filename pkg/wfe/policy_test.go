@@ -1,8 +1,11 @@
 package wfe
 
 import (
+	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // boundFixIssue binds the example workflow to an issue number.
@@ -158,7 +161,7 @@ func TestPolicy_CheckRun_RegisteredCommandIsAcceptedButNotOwned(t *testing.T) {
 
 	// With a step behind the run, the command counts against it.
 	pol = NewPolicy(bound, []ActionRecord{
-		{Kind: ActionKindRun, Command: "/gtw commit", StepID: "commit", Outcome: Outcome{Status: OutcomeOK}},
+		{Kind: ActionKindRun, Command: "/gtw commit", StepID: "commit", Outcome: outcome.Outcome{Success: true, Status: http.StatusOK}},
 	})
 	pol.Commands = []string{"gtw", "review"}
 	idx, err = pol.CheckRun("/gtw sync")
@@ -212,7 +215,7 @@ jobs:
         message: /gtw commit
 `)
 	pol := NewPolicy(wf, []ActionRecord{
-		{Kind: ActionKindRun, Command: "/gtw commit", StepID: "one", Outcome: Outcome{Status: OutcomeFailed}},
+		{Kind: ActionKindRun, Command: "/gtw commit", StepID: "one", Outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError}},
 	})
 	pol.Commands = []string{"gtw"}
 	pol.Budget = 2
@@ -227,9 +230,9 @@ jobs:
 		Kind:    ActionKindCommand,
 		Command: "/gtw sync",
 		StepID:  "one",
-		Outcome: Outcome{Status: OutcomeOK},
+		Outcome: outcome.Outcome{Success: true, Status: http.StatusOK},
 	})
-	if err := pol.CheckFinish("done"); err == nil || !strings.Contains(err.Error(), "must be ok or noop") {
+	if err := pol.CheckFinish("done"); err == nil || !strings.Contains(err.Error(), "must be a success") {
 		t.Errorf("expected must-be-ok error, got %v", err)
 	}
 
@@ -326,32 +329,32 @@ func TestPolicy_CheckFinish(t *testing.T) {
 			name:   "done after the last step succeeded",
 			status: "done",
 			history: []ActionRecord{
-				{Kind: ActionKindRun, Command: "/gtw push", StepID: "push", Outcome: Outcome{Status: OutcomeOK}},
+				{Kind: ActionKindRun, Command: "/gtw push", StepID: "push", Outcome: outcome.Outcome{Success: true, Status: http.StatusOK}},
 			},
 		},
 		{
 			name:   "done after the last step had nothing to do",
 			status: "done",
 			history: []ActionRecord{
-				{Kind: ActionKindRun, Command: "/gtw push", StepID: "push", Outcome: Outcome{Status: OutcomeNoop}},
+				{Kind: ActionKindRun, Command: "/gtw push", StepID: "push", Outcome: outcome.Outcome{Success: true, Status: http.StatusOK}},
 			},
 		},
 		{
 			name:   "done after the last step failed",
 			status: "done",
 			history: []ActionRecord{
-				{Kind: ActionKindRun, Command: "/gtw push", StepID: "push", Outcome: Outcome{Status: OutcomeFailed}},
+				{Kind: ActionKindRun, Command: "/gtw push", StepID: "push", Outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError}},
 			},
-			wantErr: "must be ok or noop",
+			wantErr: "must be a success",
 		},
 		{
 			name:   "the latest outcome of the last step wins",
 			status: "done",
 			history: []ActionRecord{
-				{Kind: ActionKindRun, Command: "/gtw push", StepID: "push", Outcome: Outcome{Status: OutcomeOK}},
-				{Kind: ActionKindRun, Command: "/gtw push", StepID: "push", Outcome: Outcome{Status: OutcomeFailed}},
+				{Kind: ActionKindRun, Command: "/gtw push", StepID: "push", Outcome: outcome.Outcome{Success: true, Status: http.StatusOK}},
+				{Kind: ActionKindRun, Command: "/gtw push", StepID: "push", Outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError}},
 			},
-			wantErr: "must be ok or noop",
+			wantErr: "must be a success",
 		},
 		{
 			name:   "failed is always allowed",
@@ -450,7 +453,7 @@ jobs:
         message: echo hi
 `)
 	pol := NewPolicy(wf, []ActionRecord{
-		{Kind: ActionKindInstruct, Command: "keep going", Outcome: Outcome{Status: OutcomeOK}},
+		{Kind: ActionKindInstruct, Command: "keep going", Outcome: outcome.Outcome{Success: true, Status: http.StatusOK}},
 	})
 	pol.Budget = 1
 

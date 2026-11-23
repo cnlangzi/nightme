@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/llm"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -382,11 +383,11 @@ func (r *run) stepSkippedLocked(stepID string) bool {
 
 // isSkippedOutcome reports whether the outcome says the step was passed
 // over.
-func isSkippedOutcome(out wfe.Outcome) bool {
-	if out.Status != wfe.OutcomeNoop {
+func isSkippedOutcome(out outcome.Outcome) bool {
+	if !out.Success {
 		return false
 	}
-	switch out.Summary {
+	switch out.StatusText {
 	case operatorSkippedSummary, agentSkippedSummary:
 		return true
 	}

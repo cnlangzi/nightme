@@ -7,11 +7,11 @@ package gtw
 // received.
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // TestFactory_New_MaterialReachesTheAgentInOneTurn pins the flow the
@@ -114,7 +114,7 @@ func TestFactory_New_YesWithExtraIsAUsageError(t *testing.T) {
 	if out == nil || !strings.HasPrefix(out.Reply, "❌ /gtw new -y creates the issues from the reviewed drafts and takes no other argument.") {
 		t.Errorf("reply = %+v, want the usage error naming both modes", out)
 	}
-	assertOutcome(t, p.settle(t), messages.OutcomeFailed, map[string]string{"reason": "usage"})
+	assertOutcome(t, p.settle(t), http.StatusBadRequest, nil)
 }
 
 // TestFactory_New_PastedYesIsRefused pins that a pasted document

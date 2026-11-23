@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -26,7 +28,7 @@ import (
 // fakeStep is one scripted answer of the chat.
 type fakeStep struct {
 	// outcome is the verdict the command reports.
-	outcome messages.Outcome
+	outcome outcome.Outcome
 	// transcript is what the coding agent said.
 	transcript []observe.Entry
 	// choices are the prompts the command is waiting for.
@@ -198,7 +200,7 @@ func (f *fakeOperator) Speak(_ context.Context, chatID, text string, opts channe
 	id := fmt.Sprintf("msg-%d", f.seq)
 
 	if !isControlText(text) {
-		step := fakeStep{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "ok"}}
+		step := fakeStep{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "ok"}}
 		if len(f.steps) > 0 {
 			step = f.steps[0]
 			f.steps = f.steps[1:]
@@ -546,7 +548,7 @@ func (f *fakeOperator) answer(chatID, requestID, optionID string) error {
 			continue
 		}
 		ex.ex.Phase = observe.PhaseSettled
-		ex.ex.Outcome = messages.Outcome{Status: messages.OutcomeOK, Summary: "answered " + optionID}
+		ex.ex.Outcome = outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "answered " + optionID}
 		for _, w := range ex.watchers {
 			w <- ex.ex
 			close(w)
@@ -567,10 +569,11 @@ func (f *fakeOperator) fail(chatID, summary string) error {
 			continue
 		}
 		ex.ex.Phase = observe.PhaseSettled
-		ex.ex.Outcome = messages.Outcome{
-			Status:  messages.OutcomeFailed,
-			Summary: summary,
-			Data:    map[string]string{"error": summary},
+		ex.ex.Outcome = outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: summary,
+			Data:       map[string]string{"error": summary},
 		}
 		for _, w := range ex.watchers {
 			w <- ex.ex
@@ -1024,10 +1027,10 @@ func waitWatched(t *testing.T, op *fakeOperator) {
 }
 
 // stepOutcome returns the outcome the run state holds for a step.
-func stepOutcome(r *run, stepID string) (wfe.Outcome, bool) {
+func stepOutcome(r *run, stepID string) (outcome.Outcome, bool) {
 	st, ok := r.stepState(stepID)
 	if !ok {
-		return wfe.Outcome{}, false
+		return outcome.Outcome{}, false
 	}
 	return st.Outcome, true
 }
@@ -1249,15 +1252,15 @@ jobs:
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
-	// The first step had nothing to do: the status is failed, but
-	// nothing broke.
+	// The first step had nothing to do: the status is a success, but
+	// nothing was fixed.
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{
-			Status:  messages.OutcomeFailed,
-			Summary: "nothing to fix",
-			Data:    map[string]string{"reason": "nothing_to_fix"},
+		{outcome: outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "nothing to fix",
 		}},
-		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "committed"}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "committed"}},
 	}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -1308,9 +1311,9 @@ jobs:
 	}}
 	svc, op := testService(t, dir, Config{Decider: decider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "fixed"}},
-		{outcome: messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to commit"}},
-		{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "fixed"}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "nothing to commit"}},
+		{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "still going"}},
 	}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -1332,10 +1335,10 @@ jobs:
 	if len(steps) != 3 {
 		t.Fatalf("the run recorded %d steps, want 3", len(steps))
 	}
-	if steps[0].ID != "fix" || steps[0].Outcome.Status != wfe.OutcomeOK {
+	if steps[0].ID != "fix" || steps[0].Outcome.Status != http.StatusOK {
 		t.Errorf("the first step = %+v, want fix with an ok outcome", steps[0])
 	}
-	if steps[1].ID != "commit" || steps[1].Outcome.Status != wfe.OutcomeNoop {
+	if steps[1].ID != "commit" || steps[1].Outcome.Status != http.StatusOK {
 		t.Errorf("the second step = %+v, want commit with a noop outcome", steps[1])
 	}
 	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
@@ -1360,10 +1363,11 @@ jobs:
 		decisionResp("jev-1.14", optionEscalate, 0.1, 0),
 	}}
 	svc, op := testService(t, dir, Config{Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeIncomplete,
-		Summary: "1 of 3 groups unfinished",
-		Data:    map[string]string{"issue": "42", "groups": "3"},
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "1 of 3 groups unfinished",
+		Data:       map[string]string{"issue": "42", "groups": "3"},
 	}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -1385,11 +1389,11 @@ jobs:
 	if len(steps) != 1 {
 		t.Fatalf("the run recorded %d steps, want 1", len(steps))
 	}
-	if steps[0].Outcome.Status != wfe.OutcomeIncomplete {
-		t.Errorf("the status = %q, want incomplete", steps[0].Outcome.Status)
+	if steps[0].Outcome.Status != http.StatusInternalServerError {
+		t.Errorf("the status = %d, want incomplete", steps[0].Outcome.Status)
 	}
-	if steps[0].Outcome.Summary != "1 of 3 groups unfinished" {
-		t.Errorf("the summary = %q", steps[0].Outcome.Summary)
+	if steps[0].Outcome.StatusText != "1 of 3 groups unfinished" {
+		t.Errorf("the summary = %q", steps[0].Outcome.StatusText)
 	}
 	if steps[0].Outcome.Data["issue"] != "42" {
 		t.Errorf("the data = %v, want the issue", steps[0].Outcome.Data)
@@ -1421,8 +1425,8 @@ jobs:
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}},
-		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "review finished"}},
+		{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "still going"}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "review finished"}},
 	}
 
 	g := newGate()
@@ -1473,8 +1477,8 @@ jobs:
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the review failed"}},
-		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "the repair worked"}},
+		{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "the review failed"}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "the repair worked"}},
 	}
 
 	g := newGate()
@@ -1489,8 +1493,8 @@ jobs:
 	if !ok {
 		t.Fatal("the review step has no outcome")
 	}
-	if out.Status != wfe.OutcomeFailed {
-		t.Errorf("the review step ended as %q, want the failed one the step produced", out.Status)
+	if out.Status != http.StatusInternalServerError {
+		t.Errorf("the review step ended as %d, want the failed one the step produced", out.Status)
 	}
 }
 
@@ -1515,9 +1519,9 @@ jobs:
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the review failed", Data: map[string]string{"error": "the review failed"}}},
-		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "the repair worked"}},
-		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "the review worked"}},
+		{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "the review failed", Data: map[string]string{"error": "the review failed"}}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "the repair worked"}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "the review worked"}},
 	}
 
 	g := newGate()
@@ -1532,8 +1536,8 @@ jobs:
 	if !ok {
 		t.Fatal("the review step has no outcome")
 	}
-	if out.Status != wfe.OutcomeOK {
-		t.Errorf("the review step ended as %q, want the ok one its own run wrote", out.Status)
+	if out.Status != http.StatusOK {
+		t.Errorf("the review step ended as %d, want the ok one its own run wrote", out.Status)
 	}
 	found := false
 	for _, rec := range runHistory(r) {
@@ -1831,11 +1835,11 @@ jobs:
 	if len(history) == 0 {
 		t.Fatal("the failed action is not in the history")
 	}
-	if history[0].Outcome.Status != wfe.OutcomeFailed {
-		t.Errorf("the action = %q, want failed", history[0].Outcome.Status)
+	if history[0].Outcome.Status != http.StatusInternalServerError {
+		t.Errorf("the action = %d, want failed", history[0].Outcome.Status)
 	}
-	if !strings.Contains(history[0].Outcome.Summary, `unknown action: "nope"`) {
-		t.Errorf("the summary = %q, want the unknown action", history[0].Outcome.Summary)
+	if !strings.Contains(history[0].Outcome.StatusText, `unknown action: "nope"`) {
+		t.Errorf("the summary = %q, want the unknown action", history[0].Outcome.StatusText)
 	}
 	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
@@ -1855,7 +1859,7 @@ func TestJudgmentPoint_ANonOkOutcomeAsksTheAgent(t *testing.T) {
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	// The first step does not finish.
-	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	op.steps = []fakeStep{{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "still going"}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
@@ -1884,7 +1888,7 @@ func TestJudgmentPoint_LowConfidenceEscalatesToTheChatModel(t *testing.T) {
 		decisionResp("jev-1.14", "/gtw fix 42 -y", 0.2, 0),
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	op.steps = []fakeStep{{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "still going"}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
@@ -1920,7 +1924,7 @@ func TestJudgmentPoint_ARefusedDecisionEscalatesToTheChatModel(t *testing.T) {
 		},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	op.steps = []fakeStep{{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "still going"}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
@@ -1942,7 +1946,7 @@ func TestJudgmentPoint_NeedsHumanAsksTheUserWhenThereIsNoChatModel(t *testing.T)
 		decisionResp("jev-1.14", "/gtw fix 42 -y", 0.95, 0.9),
 	}}
 	svc, op := testService(t, dir, Config{Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	op.steps = []fakeStep{{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "still going"}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
@@ -1973,7 +1977,7 @@ func TestJudgmentPoint_PolicyRejectedChoiceEscalates(t *testing.T) {
 		decisionResp("jev-1.14", "/gtw sync", 0.99, 0),
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	op.steps = []fakeStep{{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "still going"}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
@@ -2009,7 +2013,7 @@ func TestSystem1_UnknownOutcomeAsksWhetherTheStepSucceeded(t *testing.T) {
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	// The first step reports nothing.
-	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeUnknown}}}
+	op.steps = []fakeStep{{outcome: outcome.Outcome{Status: 0}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
@@ -2047,7 +2051,7 @@ func TestSystem1_KnownOutcomeDoesNotAskWhetherTheStepSucceeded(t *testing.T) {
 		decisionResp("jev-1.14", optionEscalate, 0.1, 0),
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	op.steps = []fakeStep{{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "still going"}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
@@ -2077,7 +2081,7 @@ func TestSystem1_DecisionIsRecordedAsASyntheticToolCall(t *testing.T) {
 		decisionResp("jev-1.14", "/gtw fix 42 -y", 0.93, 0),
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	op.steps = []fakeStep{{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "still going"}}}
 
 	g := newGate()
 	op.gate = g
@@ -2123,8 +2127,8 @@ func TestSystem1_ANoopStepIsNotAToolError(t *testing.T) {
 	// The first attempt does not finish, so the run reaches a
 	// judgment point; the command the agent runs then reports a noop.
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}},
-		{outcome: messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to commit"}},
+		{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "still going"}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "nothing to commit"}},
 	}
 
 	g := newGate()
@@ -2141,7 +2145,7 @@ func TestSystem1_ANoopStepIsNotAToolError(t *testing.T) {
 	if part.IsError {
 		t.Fatalf("a noop outcome came back as a tool error: %s", part.Text)
 	}
-	if !strings.Contains(part.Text, "noop") {
+	if !strings.Contains(part.Text, "200") {
 		t.Fatalf("the tool result does not carry the status: %s", part.Text)
 	}
 }
@@ -2158,8 +2162,8 @@ func TestSystem1_AFailedStepIsAToolError(t *testing.T) {
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}},
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed"}},
+		{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "still going"}},
+		{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "the commit failed"}},
 	}
 
 	g := newGate()

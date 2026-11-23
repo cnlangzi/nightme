@@ -2,11 +2,12 @@ package me
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/llm"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // TestTheFirstTurnOfTheChatModelHasAUserMessage — a chat model with
@@ -22,9 +23,10 @@ func TestTheFirstTurnOfTheChatModelHasAUserMessage(t *testing.T) {
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "the step did not work"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "the step did not work",
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the step did not work",
 	}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{

@@ -18,8 +18,6 @@ package review
 
 import (
 	"fmt"
-
-	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // groupCounts counts the groups a review ran and how many of them
@@ -47,6 +45,6 @@ func unfinishedData(data map[string]string, outcomes []reviewOutcome) map[string
 		return data
 	}
 	_, unfinished := groupCounts(outcomes)
-	data[wfe.OutcomeKeyUnfinished] = fmt.Sprintf("%d", unfinished)
+	data[KeyUnfinished] = fmt.Sprintf("%d", unfinished)
 	return data
 }

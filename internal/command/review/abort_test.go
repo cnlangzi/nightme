@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +22,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // ─── test doubles ──────────────────────────────────────────────────
@@ -444,9 +446,8 @@ func TestHandle_AbortStopsTheRunningReview(t *testing.T) {
 	// The run reports `cancelled`, not a failure.
 	hold.Release()
 	got := waitOutcome(t, em, 5*time.Second)
-	assertOutcome(t, got, messages.OutcomeCancelled, map[string]string{
-		"agent":  starter.name,
-		"reason": "aborted",
+	assertOutcome(t, got, outcome.StatusClientClosedRequest, map[string]string{
+		"agent": starter.name,
 	})
 
 	// Exactly one abort notice, on the review's own message.
@@ -493,7 +494,7 @@ func TestHandle_AbortWithNoRunInFlight(t *testing.T) {
 		t.Fatalf("unexpected reply: %q", out.Reply)
 	}
 	got := waitOutcome(t, em, 5*time.Second)
-	assertOutcome(t, got, messages.OutcomeNoop, nil)
+	assertOutcome(t, got, http.StatusOK, nil)
 }
 
 // TestHandle_AbortNeedsNoWorkspaceNorAgent covers R3: the abort
@@ -661,9 +662,8 @@ func TestHandle_AbortStopsARunningContinuation(t *testing.T) {
 
 	hold.Release()
 	got := waitOutcome(t, em, 5*time.Second)
-	assertOutcome(t, got, messages.OutcomeCancelled, map[string]string{
-		"agent":  starter.name,
-		"reason": "aborted",
+	assertOutcome(t, got, outcome.StatusClientClosedRequest, map[string]string{
+		"agent": starter.name,
 	})
 }
 
@@ -724,7 +724,7 @@ func TestHandle_ChatCloseIsNotReportedAsAnAbort(t *testing.T) {
 
 	hold.Release()
 	got := waitOutcome(t, em, 5*time.Second)
-	if got.Status == messages.OutcomeCancelled {
+	if got.Status == outcome.StatusClientClosedRequest {
 		t.Fatalf("the chat close was reported as an abort: %+v", got)
 	}
 	if notices := abortNotices(em); len(notices) != 0 {
@@ -772,7 +772,7 @@ func TestHandle_AbortAfterTheFanoutIsANoOp(t *testing.T) {
 	}
 	hold.Release()
 	got := waitOutcome(t, em, 5*time.Second)
-	assertOutcome(t, got, messages.OutcomeOK, map[string]string{"agent": starter.name})
+	assertOutcome(t, got, http.StatusOK, map[string]string{"agent": starter.name})
 }
 
 // TestHandle_AbortedContinuationKeepsTheSessionIds covers the groups

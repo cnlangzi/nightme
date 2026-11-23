@@ -4,13 +4,14 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net/http"
 	"sync"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // The verdict `/gtw fix` reports after the coding agent's turn.
@@ -135,9 +136,10 @@ func (v *fixVerdict) report(reason agent.PromptEndReason) {
 		defer v.unsubscribe()
 		defer v.work.Release()
 		if reason != agent.PromptEndClean {
-			v.work.Report(messages.Outcome{
-				Status: messages.OutcomeUnknown,
-				Data:   maps.Clone(v.data),
+			v.work.Report(outcome.Outcome{
+				Success: false,
+				Status:  0,
+				Data:    maps.Clone(v.data),
 			})
 			return
 		}
@@ -160,7 +162,7 @@ func judgeFixWork(
 	deps HandlerDeps,
 	worktree, branch, repoRoot, base string,
 	data map[string]string,
-) messages.Outcome {
+) outcome.Outcome {
 	ctx, cancel := context.WithTimeout(ctx, verdictGitTimeout)
 	defer cancel()
 
@@ -198,13 +200,14 @@ func judgeFixWork(
 				"the worktree could not be read after the agent's turn",
 				"the worktree is clean and the branch's history could not be counted")
 		}
-		return command.FailedOutcomeData("no_changes",
+		return command.FailedOutcomeData(http.StatusInternalServerError,
 			"the agent left the worktree unchanged", facts)
 	}
-	return messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: fmt.Sprintf("the agent produced %d change(s) on %s", counts.total(), branch),
-		Data:    facts,
+	return outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: fmt.Sprintf("the agent produced %d change(s) on %s", counts.total(), branch),
+		Data:       facts,
 	}
 }
 
@@ -234,10 +237,10 @@ func countAgentCommits(ctx context.Context, deps HandlerDeps, worktree, repoRoot
 // fixWorkException builds the outcome of a fix whose work could not
 // be judged — the facts the fix produced ride along, the error
 // description says what broke.
-func fixWorkException(data map[string]string, reason, summary, desc string) messages.Outcome {
+func fixWorkException(data map[string]string, reason, summary, desc string) outcome.Outcome {
 	facts := maps.Clone(data)
 	if facts == nil {
 		facts = map[string]string{}
 	}
-	return command.FailedOutcomeData(reason, summary, facts, desc)
+	return command.FailedOutcomeData(http.StatusInternalServerError, desc, facts)
 }

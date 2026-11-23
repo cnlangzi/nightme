@@ -9,6 +9,7 @@ package review
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -354,7 +355,7 @@ func TestHandle_ReviewReportsTheTimedOutGroup(t *testing.T) {
 	}
 	hold.Release()
 	got := waitOutcome(t, em, 5*time.Second)
-	assertOutcome(t, got, messages.OutcomeIncomplete, map[string]string{
+	assertOutcome(t, got, http.StatusInternalServerError, map[string]string{
 		"groups":           "2",
 		"unfinished":       "1",
 		"timed_out_groups": "1",

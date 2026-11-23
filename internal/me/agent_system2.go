@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -180,9 +181,8 @@ func (s *Service) waitBeforeRetry(ctx context.Context, r *run) error {
 // The situation moved on — the agent has one chance less — so the
 // model reads the report again before it decides.
 func (s *Service) chargeStall(r *run, summary string) {
-	r.record(wfe.ActionKindStall, "", r.budgetStep(), wfe.Outcome{
-		Status:  wfe.OutcomeUnknown,
-		Summary: summary,
+	r.record(wfe.ActionKindStall, "", r.budgetStep(), outcome.Outcome{
+		StatusText: summary,
 	})
 	r.markSituation()
 }
@@ -247,7 +247,7 @@ func compactResult(text string) string {
 	if err := json.Unmarshal([]byte(text), &res); err != nil {
 		return text
 	}
-	short := stepResult{Status: res.Status, Summary: res.Summary}
+	short := stepResult{Outcome: res.Outcome}
 	raw, err := json.Marshal(short)
 	if err != nil {
 		return text

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -12,17 +13,18 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // okStep is a command that succeeded.
 func okStep(summary string) fakeStep {
-	return fakeStep{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: summary}}
+	return fakeStep{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: summary}}
 }
 
 // pendingStep is a command that did not finish: the run reaches a
 // judgment point and the agent takes over.
 func pendingStep(summary string) fakeStep {
-	return fakeStep{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: summary}}
+	return fakeStep{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: summary}}
 }
 
 func TestSystem2_ToolDispatch(t *testing.T) {
@@ -183,7 +185,7 @@ func TestSystem2_ANoopStepIsNotAToolError(t *testing.T) {
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "nothing to commit"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
-	op.steps = []fakeStep{pendingStep("still going"), {outcome: messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to commit"}}}
+	op.steps = []fakeStep{pendingStep("still going"), {outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "nothing to commit"}}}
 
 	g := newGate()
 	op.gate = g
@@ -199,7 +201,7 @@ func TestSystem2_ANoopStepIsNotAToolError(t *testing.T) {
 	if part.IsError {
 		t.Fatalf("a noop outcome came back as a tool error: %s", part.Text)
 	}
-	if !strings.Contains(part.Text, "noop") {
+	if !strings.Contains(part.Text, "200") {
 		t.Fatalf("the tool result does not carry the status: %s", part.Text)
 	}
 }
@@ -296,7 +298,7 @@ func TestRun_HasNoTurnCap(t *testing.T) {
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	for i := 0; i < steps; i++ {
-		op.steps = append(op.steps, fakeStep{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "ok"}})
+		op.steps = append(op.steps, fakeStep{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "ok"}})
 	}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -341,7 +343,7 @@ jobs:
 	}}
 	op := newFakeOperator(
 		pendingStep("still going"),
-		fakeStep{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "committed"},
+		fakeStep{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "committed"},
 			transcript: []observe.Entry{{Kind: messages.OutResult, Text: "the coding agent said hello"}}},
 		okStep("pushed"),
 	)
@@ -381,12 +383,12 @@ func TestCompact_OldToolResultsKeepOnlyTheOutcome(t *testing.T) {
 		{Role: llm.RoleAssistant, Parts: []llm.Part{{Type: llm.PartToolCall, ToolCallID: "c1", ToolName: toolResume}}},
 		{Role: llm.RoleTool, Parts: []llm.Part{{
 			Type: llm.PartToolResult, ToolCallID: "c1", ToolName: toolResume,
-			Text: `{"status":"ok","summary":"committed","transcript":"a long transcript"}`,
+			Text: `{"success":true,"status":200,"statusText":"committed","transcript":"a long transcript"}`,
 		}}},
 		{Role: llm.RoleAssistant, Parts: []llm.Part{{Type: llm.PartToolCall, ToolCallID: "c2", ToolName: toolResume}}},
 		{Role: llm.RoleTool, Parts: []llm.Part{{
 			Type: llm.PartToolResult, ToolCallID: "c2", ToolName: toolResume,
-			Text: `{"status":"ok","summary":"pushed","transcript":"another transcript"}`,
+			Text: `{"success":true,"status":200,"statusText":"pushed","transcript":"another transcript"}`,
 		}}},
 	}
 	out := compact(msgs)
@@ -550,18 +552,20 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 	op := newFakeOperator(
 		okStep("fixed"),
 		okStep("committed"),
-		fakeStep{outcome: messages.Outcome{
-			Status:  messages.OutcomeIncomplete,
-			Summary: "1 of 3 groups unfinished",
-			Data:    map[string]string{"groups": "3", "unfinished": "1"},
+		fakeStep{outcome: outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "1 of 3 groups unfinished",
+			Data:       map[string]string{"groups": "3", "unfinished": "1"},
 		}},
 		okStep("review finished"),
 		okStep("review finished"),
 		okStep("pushed"),
-		fakeStep{outcome: messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "pull request opened",
-			Data:    map[string]string{"pr_number": "7", "pr_url": "https://example.test/pr/7"},
+		fakeStep{outcome: outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "pull request opened",
+			Data:       map[string]string{"pr_number": "7", "pr_url": "https://example.test/pr/7"},
 		}},
 	)
 	svc := New(Config{

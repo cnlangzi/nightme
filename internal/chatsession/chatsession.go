@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/registry"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // Type aliases — let ChatSession use AgentSession types without
@@ -1122,10 +1124,10 @@ func (cs *ChatSession) emitMessageDropped(msg Message) {
 	// here: every hold is released, the settled message goes out, and
 	// the work does not linger for the chat's lifetime.
 	if w := cs.workFor(msg.ID); w != nil {
-		w.Report(messages.Outcome{
-			Status:  messages.OutcomeCancelled,
-			Summary: "message dropped before it reached the agent",
-			Data:    map[string]string{"reason": "dropped"},
+		w.Report(outcome.Outcome{
+			Success:    false,
+			Status:     outcome.StatusClientClosedRequest,
+			StatusText: "message dropped before it reached the agent",
 		})
 		w.ReleaseAll()
 	}
@@ -1279,13 +1281,10 @@ func (cs *ChatSession) QueueUserMessage(msg Message) error {
 		// will end for it. Settle it now instead of leaving the
 		// hold open forever.
 		if w != nil {
-			w.Report(messages.Outcome{
-				Status:  messages.OutcomeFailed,
-				Summary: "input queue full",
-				Data: map[string]string{
-					"reason":                 "queue_full",
-					messages.OutcomeKeyError: "input queue full",
-				},
+			w.Report(outcome.Outcome{
+				Success:    false,
+				Status:     http.StatusServiceUnavailable,
+				StatusText: "input queue full",
 			})
 			w.Release()
 		}
@@ -1356,13 +1355,10 @@ func (cs *ChatSession) SteerUserMessage(msg Message) error {
 		// The text never reaches an agent turn — no prompt will
 		// end for it. Settle it instead of holding it forever.
 		if w != nil {
-			w.Report(messages.Outcome{
-				Status:  messages.OutcomeFailed,
-				Summary: "input queue full",
-				Data: map[string]string{
-					"reason":                 "queue_full",
-					messages.OutcomeKeyError: "input queue full",
-				},
+			w.Report(outcome.Outcome{
+				Success:    false,
+				Status:     http.StatusServiceUnavailable,
+				StatusText: "input queue full",
 			})
 			w.Release()
 		}
@@ -1626,6 +1622,7 @@ func (cs *ChatSession) writebackMessageState(as *AgentSession, p *Prompt) {
 		Reason:         p.EndReason,
 		EndedAt:        p.EndedAt,
 		AgentSessionID: asID,
+		Err:            p.Err,
 	})
 }
 

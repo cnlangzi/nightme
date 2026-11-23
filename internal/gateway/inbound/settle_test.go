@@ -3,6 +3,7 @@ package inbound
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sync"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/gateway/inbound/teststubs"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // settleEmitter records the outbound messages the router emits.
@@ -33,7 +35,7 @@ func (e *settleEmitter) record() []messages.OutboundMessage {
 
 // settleCommander is a command that reports a canned outcome.
 type settleCommander struct {
-	outcome *messages.Outcome
+	outcome *outcome.Outcome
 	reply   string
 }
 
@@ -123,7 +125,7 @@ func TestRunCommand_SettledUnknownWhenNothingReported(t *testing.T) {
 	if settled == nil {
 		t.Fatal("no settled message")
 	}
-	if settled.Outcome == nil || settled.Outcome.Status != messages.OutcomeUnknown {
+	if settled.Outcome == nil || settled.Outcome.Status != 0 {
 		t.Errorf("settled outcome = %+v, want unknown", settled.Outcome)
 	}
 }
@@ -134,10 +136,11 @@ func TestRunCommand_SettledCarriesReportedOutcome(t *testing.T) {
 	em := &settleEmitter{}
 	out := runSettleRouter(t, &settleCommander{
 		reply: "pushed",
-		outcome: &messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "pushed 3 commits",
-			Data:    map[string]string{"branch": "feat/x"},
+		outcome: &outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "pushed 3 commits",
+			Data:       map[string]string{"branch": "feat/x"},
 		},
 	}, em)
 
@@ -153,8 +156,8 @@ func TestRunCommand_SettledCarriesReportedOutcome(t *testing.T) {
 	if settled.Outcome == nil {
 		t.Fatal("settled message has no outcome")
 	}
-	if settled.Outcome.Status != messages.OutcomeOK {
-		t.Errorf("settled status = %s, want ok", settled.Outcome.Status)
+	if settled.Outcome.Status != http.StatusOK {
+		t.Errorf("settled status = %d, want ok", settled.Outcome.Status)
 	}
 	if settled.Outcome.Data["branch"] != "feat/x" {
 		t.Errorf("settled data = %v, want branch=feat/x", settled.Outcome.Data)
@@ -177,11 +180,11 @@ func TestRunCommand_SettledFailedWhenTheCommandErrors(t *testing.T) {
 	if settled == nil {
 		t.Fatal("no settled message")
 	}
-	if settled.Outcome == nil || settled.Outcome.Status != messages.OutcomeFailed {
+	if settled.Outcome == nil || settled.Outcome.Status != http.StatusInternalServerError {
 		t.Fatalf("settled outcome = %+v, want failed", settled.Outcome)
 	}
-	if settled.Outcome.Summary != "boom" {
-		t.Errorf("settled summary = %q, want %q", settled.Outcome.Summary, "boom")
+	if settled.Outcome.StatusText != "boom" {
+		t.Errorf("settled summary = %q, want %q", settled.Outcome.StatusText, "boom")
 	}
 }
 
@@ -210,7 +213,7 @@ func TestRunCommand_SettledFailedWhenTheCommandPanics(t *testing.T) {
 	if settled == nil {
 		t.Fatal("no settled message")
 	}
-	if settled.Outcome == nil || settled.Outcome.Status != messages.OutcomeFailed {
+	if settled.Outcome == nil || settled.Outcome.Status != http.StatusInternalServerError {
 		t.Fatalf("settled outcome = %+v, want failed", settled.Outcome)
 	}
 }

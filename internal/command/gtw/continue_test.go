@@ -8,6 +8,7 @@ package gtw
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,7 +19,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // -----------------------------------------------------------------------------
@@ -337,7 +337,7 @@ func TestRunCommit_GlobalWithUnknownAgentIsRejected(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{"reason": "unknown_agent"})
+	assertOutcome(t, got, http.StatusNotFound, nil)
 	if _, statErr := os.Stat(userYmlPath(home)); statErr == nil {
 		t.Errorf("the config file was written for an unregistered agent")
 	}
@@ -429,7 +429,7 @@ func TestRunCommit_FlagCombinationIsRefused(t *testing.T) {
 				t.Errorf("reply = %q, want it to name the refused combination (%q)", out.Reply, tc.want)
 			}
 			got := p.settle(t)
-			assertOutcome(t, got, messages.OutcomeFailed, map[string]string{"reason": "usage"})
+			assertOutcome(t, got, http.StatusBadRequest, nil)
 		})
 	}
 }
@@ -468,7 +468,7 @@ func TestRunCommit_GlobalWriteFailureStillRuns(t *testing.T) {
 		t.Errorf("the warning is missing from the reply:\n%s", allText(s))
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeIncomplete, map[string]string{"reason": "config_write_failed"})
+	assertOutcome(t, got, http.StatusInternalServerError, nil)
 }
 
 // -----------------------------------------------------------------------------
@@ -512,7 +512,7 @@ func TestDispatchCommit_ContinueWithoutARecord(t *testing.T) {
 		t.Errorf("reply = %q, want the no-continue refusal", p.ch.lastText())
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{"reason": "no_continue"})
+	assertOutcome(t, got, http.StatusNotFound, nil)
 }
 
 // TestDispatchCommit_ContinueAfterSuccess covers the "the last one
@@ -535,7 +535,7 @@ func TestDispatchCommit_ContinueAfterSuccess(t *testing.T) {
 		t.Errorf("reply = %q, want the nothing-to-continue notice", p.ch.lastText())
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeNoop, nil)
+	assertOutcome(t, got, http.StatusOK, nil)
 }
 
 // TestDispatchCommit_FailureIsRecorded covers the write side: an
@@ -620,7 +620,7 @@ func TestDispatchCommit_ContinueReplaysThePrompt(t *testing.T) {
 		t.Errorf("the agent received %q, want the recorded prompt", text)
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeOK, nil)
+	assertOutcome(t, got, http.StatusOK, nil)
 }
 
 // TestDispatchCommit_ContinueResumesTheSession covers the "the
@@ -741,7 +741,7 @@ func TestDispatchCommit_ContinueUsesTheRecordedWorktree(t *testing.T) {
 		}
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeOK, nil)
+	assertOutcome(t, got, http.StatusOK, nil)
 }
 
 // -----------------------------------------------------------------------------
@@ -765,7 +765,7 @@ func TestDispatchPR_ContinueWithoutARecord(t *testing.T) {
 		t.Errorf("reply = %q, want the no-continue refusal", p.ch.lastText())
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{"reason": "no_continue"})
+	assertOutcome(t, got, http.StatusNotFound, nil)
 }
 
 // TestDispatchPR_FormatFailureIsRecorded covers the write side of
@@ -857,7 +857,7 @@ func TestDispatchPR_ContinueReplaysTheStoredPrompt(t *testing.T) {
 		t.Errorf("the pull request was not opened: %q", p.ch.lastText())
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeOK, nil)
+	assertOutcome(t, got, http.StatusOK, nil)
 }
 
 // TestDispatchCommit_ContinueUpdatesTheRecord covers the chain: a
@@ -1005,7 +1005,7 @@ func TestDispatchCommit_ContinueWithNoRecordedAgentResolvesOne(t *testing.T) {
 		t.Errorf("the continuation refused with an unknown agent: %q", p.ch.lastText())
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeOK, nil)
+	assertOutcome(t, got, http.StatusOK, nil)
 }
 
 // TestRunCommit_ContinueHooksSeeTheRecordedWorkspace covers the

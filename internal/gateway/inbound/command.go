@@ -31,10 +31,12 @@ package inbound
 import (
 	"context"
 	"log/slog"
+	"net/http"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // tryCommandDispatch claims /-prefixed text via commander.Match.
@@ -103,13 +105,10 @@ func (r *Router) runCommand(ctx context.Context, mgr *chatsession.Manager, comma
 			// channel too. A driver that only reads the settled
 			// message must not see "unknown" for a command that
 			// visibly blew up.
-			work.Report(messages.Outcome{
-				Status:  messages.OutcomeFailed,
-				Summary: "the command panicked",
-				Data: map[string]string{
-					"reason":                 "panic",
-					messages.OutcomeKeyError: "the command panicked",
-				},
+			work.Report(outcome.Outcome{
+				Success:    false,
+				Status:     http.StatusInternalServerError,
+				StatusText: "the command panicked",
 			})
 			r.emitCommandReply(ctx, nil, msg, "❌ internal error (see daemon log)")
 		}
@@ -150,12 +149,10 @@ func (r *Router) runCommand(ctx context.Context, mgr *chatsession.Manager, comma
 		HasMention: msg.HasMention,
 	})
 	if err != nil {
-		chatsession.ReportOutcome(cmdCtx, messages.Outcome{
-			Status:  messages.OutcomeFailed,
-			Summary: err.Error(),
-			Data: map[string]string{
-				messages.OutcomeKeyError: err.Error(),
-			},
+		chatsession.ReportOutcome(cmdCtx, outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: err.Error(),
 		})
 		r.emitCommandReply(ctx, cs, msg, "❌ "+err.Error())
 		return

@@ -90,7 +90,7 @@ The file is fetched from the hub through three tiers, in order: GitHub, jsDelivr
 
 The address is `<owner>/<name>`: the owner is the namespace the workflow is published under — lowercase letters, digits, dashes and underscores, starting with a letter or a digit — and the name is its lowercase kebab-case short name. `actions` and `runs` are reserved by the workflows directory, so they are not owners. An address that carries no owner is the project's own namespace, and the owner is filled in before the shape is checked, so the name it carries has to fit the same rules: `Coder` is refused.
 
-The install's outcome carries the reason it came to: `installed`, `skipped`, `updated`, `unchanged`, `not_found`, `invalid_address`, `unreachable`, `invalid_content` or `write_failed`.
+The install's outcome says in one line what it came to: installed, skipped, updated, unchanged, not found, an invalid address, an unreachable tier, a file that does not validate, or a file that could not be written. A failure carries the status that says which one it was.
 
 ### 1.2 Uninstalling a workflow
 
@@ -102,7 +102,7 @@ The install's outcome carries the reason it came to: `installed`, `skipped`, `up
 
 The bundle `~/.nightme/workflows/nightme/coder/` is removed, with every file under it. The owner directory `~/.nightme/workflows/nightme/` goes with it when nothing else is left in it; a directory that still holds another workflow — or any other file — stays as it is. The removal is shown as a checklist of one row, and the path it reports is home-relative and uses forward slashes. The short name works here too: `/wf uninstall coder` takes away the same workflow.
 
-The uninstall's outcome carries the reason it came to: `uninstalled`, `not_installed` or `remove_failed`.
+The uninstall's outcome says in one line what it came to: uninstalled, not installed, or the file could not be removed.
 
 ### 1.3 Checking a workflow
 
@@ -466,7 +466,7 @@ The step's outputs carry what the command produced: `data.exit_code`, `data.stdo
   wait: 5m
 ```
 
-The step waits five minutes and then reports `ok`. The duration is a Go duration (`30s`, `5m`, `1h30m`); a value that does not parse is refused when the file is loaded. A wait carries no command.
+The step waits five minutes and then reports a success. The duration is a Go duration (`30s`, `5m`, `1h30m`); a value that does not parse is refused when the file is loaded. A wait carries no command.
 
 A wait is a step of a round: it waits inside the round, and it runs only when the round reaches it — the expression language has no negation, so a wait that runs only when the queue was empty cannot be written as a condition on the step's outcome. The gap between two rounds of a job is the job's own `sleep` (see §4): the engine keeps it however the round ended, so the back-off of a repeating job survives the round the agent ended early.
 
@@ -612,8 +612,9 @@ Any string value can embed expressions. Expressions are evaluated when the step 
 | Expression | Resolves to |
 |---|---|
 | `${{ args.NAME }}` | The value of the argument `NAME`. |
-| `${{ steps.<id>.outputs.status }}` | The status of the step `<id>` — `ok`, `noop`, `incomplete`, `failed`, `cancelled`, `timeout`, `unknown`. |
-| `${{ steps.<id>.outputs.summary }}` | The one-line summary of the step `<id>`. |
+| `${{ steps.<id>.outputs.success }}` | Whether the step `<id>` did its job — `true` or `false`. |
+| `${{ steps.<id>.outputs.status }}` | The HTTP status of the step `<id>` — `200`, `409`, `500`, … |
+| `${{ steps.<id>.outputs.statusText }}` | The one line that says what happened to the step `<id>`. |
 | `${{ steps.<id>.outputs.data.<key> }}` | One of the facts the step `<id>` reported. |
 | `${{ needs.<job>.* }}` | The outputs of the last step of the job `<job>`. |
 | `${{ env.NAME }}` | The value of the environment variable `NAME`. |
@@ -625,7 +626,7 @@ Any string value can embed expressions. Expressions are evaluated when the step 
 
 The `outputs` segment is optional: the rest of the path is joined with `.` into one key. `${{ steps.fix.outputs.data.issue }}` and `${{ steps.fix.data.issue }}` read the same fact, and a key that is not an output falls back to the data namespace, so `${{ steps.fix.outputs.issue }}` finds the `issue` fact of the outcome.
 
-The `error` fact is reserved: it is the error description the plan reads to tell a normal result from a breakage (see §8.2), and only the step that broke fills it. A shell step or an action that reports an `error` output of its own does not get to claim it — the fact is dropped from the outputs.
+Every fact is a fact: the plan reads the status to tell a normal result from a breakage (see §8.2), and the facts say which case it was.
 
 A condition is true when the value it resolves to is neither empty, `false` nor `0`.
 
@@ -796,7 +797,7 @@ The **ready set** is the set of unrun steps whose job's `needs` are all satisfie
 | no step in the ready set, and no job repeats | a judgment point — the plan is exhausted |
 | no step in the ready set, and a job repeats | that job starts its next round |
 
-The plan reads the **error description** of the previous outcome to tell a normal result from a breakage. An outcome that carries one is an **exception**: something broke, so the flow cannot go on by itself and the agent decides. An outcome without one is a **normal result**: the request was valid and there was nothing to do, so the flow continues on its own. The status alone does not say it — a command that ran *because* something existed and found nothing to do reports `failed` — so the description is what the plan reads. The statuses `cancelled`, `timeout`, `incomplete` and `unknown` are exceptions whatever they carry: none of them is a completed piece of work.
+The plan reads the **status** of the previous outcome to tell a normal result from a breakage. A `4xx` or a `5xx` is an **exception**: something broke, so the flow cannot go on by itself and the agent decides. A `2xx` is a **normal result**: the request was valid and the work got done or there was nothing to do, so the flow continues on its own. A `499` is an exception whatever it carries: somebody stopped the step.
 
 A run that has not executed anything yet counts as a normal result, so the first step runs on the fast path.
 
@@ -846,7 +847,7 @@ The policy is the bound on what a run may do. It is a pure function of the workf
 | `CheckRun(command)` | Whether the command may run now and which step it counts against. |
 | `CheckStep(index)` | Whether the step may take an action now — its budget for the current round. |
 | `CheckInstruct()` | Whether a free-form instruction is allowed. |
-| `CheckFinish(status)` | Whether the run may end. `done` needs the last executed step's latest outcome to be `ok` or `noop`; `failed` is always allowed. |
+| `CheckFinish(status)` | Whether the run may end. `done` needs the last executed step's latest outcome to be a success; `failed` is always allowed. |
 | `Remaining()` | The chances left per step. |
 | `Render()` | The workflow as a compact text block: the identity, the title, the steps, their descriptions and the limits. |
 | `StepCommands()` | The step messages the policy accepts right now. |
@@ -893,7 +894,7 @@ At a judgment point, the agent asks the decision model what comes next.
 |---|---|---|
 | `next` | choice — the steps' `message:` values, plus `done` and `escalate`; each option's description is the step's description | always |
 | `needs_human` | yes/no — does the next step need the user's judgement or credentials | always |
-| `step_succeeded` | yes/no — did the last step work | only when the last outcome is `unknown` |
+| `step_succeeded` | yes/no — did the last step work | only when the last outcome reported no verdict |
 
 The decision is acted on without the chat model when all of these hold:
 
@@ -926,7 +927,7 @@ Anything that needs text — an instruction, an answer to a prompt — always go
 
 Without a chat model, an escalation becomes a question for the user: the agent lists the options and `/me reply <option>` picks one. An action that needs text goes to `ask_human` in that mode.
 
-The fast path needs no model at all: a workflow whose every step ends `ok` runs with zero calls to either capability.
+The fast path needs no model at all: a workflow whose every step ends in a success runs with zero calls to either capability.
 
 ### 8.8 The configuration
 
@@ -1055,21 +1056,24 @@ The run's lifecycle belongs to these commands alone. `/close`, `/stop` and `/new
 
 The run judges from facts, not from text. Every command the agent sends reports a structured outcome.
 
+The status is an HTTP status, and its category says which branch the
+step took.
+
 | Status | Meaning |
 |---|---|
-| `ok` | The step did what it was asked to do. |
-| `noop` | There was nothing to do — the request was valid, the world already satisfied it. A step that was skipped is `noop` too: it did not complete by the workflow's execution, and the plan moved past it. |
-| `incomplete` | The step partly worked; the rest is still open. |
-| `failed` | The step did not work. A command that ran *because* something existed and found nothing to do reports `failed`: nothing to commit, nothing to push, no diff to review, an empty queue. Whether that is a breakage or a normal branch is the error description's business. |
-| `cancelled` | Somebody stopped it. |
-| `timeout` | It ran out of time. |
-| `unknown` | Nobody reported a verdict. |
+| `2xx` | The step did what it was asked to do — or there was nothing to do, which counts as done. A step that was skipped is `2xx` too: it did not complete by the workflow's execution, and the plan moved past it. |
+| `4xx` | The request or the world refused it: the command line was wrong, the issue is not there, the branch is in the way. |
+| `5xx` | Something broke: the agent did not run, the worktree could not be read, the platform could not be reached. |
+| `499` | Somebody stopped it. |
+| `0` | Nobody reported a verdict. |
 
-An outcome may carry an **error description** — `Data["error"]`, one line that says what broke. Its presence is the axis the two kinds of failure sit on: an outcome that carries one is an **exception**, an outcome without one is a **normal result** — the request was valid and there was nothing to do. The status alone cannot say it, so the plan reads the description: a `failed` outcome without a description is a normal branch, and the flow goes on with the next step of the plan (see §8.2). The contract itself is in [`me.md`](./me.md).
+A `2xx` is a **normal result** and a `4xx` or a `5xx` is an **exception**: something broke, so the flow cannot go on by itself and the agent decides (see §8.2). The contract itself is in [`me.md`](./me.md).
 
-A step that is still running reports `waiting`, and a step whose execution is gone reports `interrupted`.
+A command that ran *because* something existed and found nothing to do is a `2xx` — nothing to commit, nothing to push, an empty queue. The **facts** say which case it was: no `issue` key, or `commits=0`.
 
-The outcome of a step reaches the run state and the expressions of the steps after it: the status as `${{ steps.<id>.outputs.status }}`, the facts under `${{ steps.<id>.outputs.data.<key> }}`.
+A step that is still running has no verdict yet, and a step whose execution is gone has none either.
+
+The outcome of a step reaches the run state and the expressions of the steps after it: the verdict as `${{ steps.<id>.outputs.success }}`, the status as `${{ steps.<id>.outputs.status }}`, the words as `${{ steps.<id>.outputs.statusText }}`, the facts under `${{ steps.<id>.outputs.data.<key> }}`.
 
 The chat sees the outcome on the card of the session it belongs to — one
 message, patched in place. The card of the run is the plan of the run: it names
@@ -1186,8 +1190,8 @@ left. A step that failed never reads like a step that has not started.
 The row is the same row in every channel that renders a checklist: Feishu,
 Telegram and Discord all render the number, the marker, the subject and the
 detail of the row in the same way. The subject of a `/me` row is the id of the
-step, and its detail carries facts only — the summary of the outcome, the
-error description and the chances left. The branch the step worked on is not
+step, and its detail carries facts only — the words of the outcome and the
+chances left. The branch the step worked on is not
 in the detail: the card the operator read names it.
 
 ```
@@ -1245,7 +1249,7 @@ decisions (last 10 of 23):
 └─ the chat model — run_step(step_id=review) · because: the plan is exhausted
 ```
 
-The facts come from the run's own record: no model is asked to write the record. The headline names the phase the run ended in, and a run that failed says why under it — an error that never reached an action of the run leaves no row in the `errors` block. The `errors` are the actions whose outcome was `failed`, `incomplete`, `cancelled` or `timeout`, at most the last five of them; the `decisions` are the judgments the models made at the wake-ups, at most the last ten. The tree of the rounds carries the counters of the run: the number of decisions and the tokens ride in its last row, so a run that finished no round shows neither. Its heading stays plain: the number of rounds is the state of a run that is still going, and the record describes a run that is over. A row is cut short: a shell step reports a whole build log as its summary, and a card that carries it is unreadable.
+The facts come from the run's own record: no model is asked to write the record. The headline names the phase the run ended in, and a run that failed says why under it — an error that never reached an action of the run leaves no row in the `errors` block. The `errors` are the actions whose outcome was a failure or a cancellation, at most the last five of them; the `decisions` are the judgments the models made at the wake-ups, at most the last ten. The tree of the rounds carries the counters of the run: the number of decisions and the tokens ride in its last row, so a run that finished no round shows neither. Its heading stays plain: the number of rounds is the state of a run that is still going, and the record describes a run that is over. A row is cut short: a shell step reports a whole build log as its summary, and a card that carries it is unreadable.
 
 The wake log holds the model decisions only: the workflow's own fast path is not a decision a model made, so a run that goes through its workflow without asking a model holds no wake records at all. A decision model answer and a chat model turn are two records.
 

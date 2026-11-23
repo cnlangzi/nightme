@@ -316,9 +316,6 @@ func (t *Tracker) settleLocked(ex *execution, msg messages.OutboundMessage, now 
 	if msg.Outcome != nil {
 		ex.outcome = *msg.Outcome
 	}
-	if ex.outcome.Status == "" {
-		ex.outcome.Status = messages.OutcomeUnknown
-	}
 	if t.inflight[ex.chatID] == ex.msgID {
 		delete(t.inflight, ex.chatID)
 	}

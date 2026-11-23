@@ -14,6 +14,7 @@ package gtw
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,11 +22,12 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // settledOutcome returns the outcome of the settled message the
 // channel recorded, or nil when the message has not settled.
-func settledOutcomeOf(ch *recordingCh) *messages.Outcome {
+func settledOutcomeOf(ch *recordingCh) *outcome.Outcome {
 	ch.mu.Lock()
 	defer ch.mu.Unlock()
 	for _, m := range ch.sends {
@@ -36,27 +38,26 @@ func settledOutcomeOf(ch *recordingCh) *messages.Outcome {
 	return nil
 }
 
-// assertNoError asserts that the outcome is a normal branch: it
-// carries no error description.
-func assertNoError(t *testing.T, got *messages.Outcome) {
+// assertNoError asserts that the outcome is a normal branch: a 2xx.
+func assertNoError(t *testing.T, got *outcome.Outcome) {
 	t.Helper()
 	if got == nil {
 		t.Fatal("no settled outcome")
 	}
-	if desc, ok := got.Data["error"]; ok {
-		t.Errorf("a normal branch carries no error description, got %q", desc)
+	if !got.Success {
+		t.Errorf("a normal branch is a success, got status %d", got.Status)
 	}
 }
 
-// assertError asserts that the outcome is an exception: it carries
-// an error description.
-func assertError(t *testing.T, got *messages.Outcome) {
+// assertError asserts that the outcome is an exception: a 4xx or a
+// 5xx.
+func assertError(t *testing.T, got *outcome.Outcome) {
 	t.Helper()
 	if got == nil {
 		t.Fatal("no settled outcome")
 	}
-	if got.Data["error"] == "" {
-		t.Errorf("an exception carries an error description, got none: %v", got.Data)
+	if got.Success {
+		t.Errorf("an exception is not a success, got status %d", got.Status)
 	}
 }
 
@@ -97,7 +98,7 @@ func TestGtwOutcome_CommitCreated(t *testing.T) {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeOK, map[string]string{
+	assertOutcome(t, got, http.StatusOK, map[string]string{
 		"branch":  "wt-dirty",
 		"commits": "1",
 	})
@@ -130,15 +131,12 @@ func TestGtwOutcome_CommitAlreadyCommitted(t *testing.T) {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
-		"reason":     "nothing_to_commit",
-		"branch":     "wt-clean",
+	assertOutcome(t, got, http.StatusOK, map[string]string{"branch": "wt-clean",
 		"commits":    "1",
-		"commit_log": "abc1234 feat: the work",
-	})
+		"commit_log": "abc1234 feat: the work"})
 	assertNoError(t, got)
-	if !strings.Contains(got.Summary, "already committed") {
-		t.Errorf("outcome summary = %q, want it to say the work was committed before", got.Summary)
+	if !strings.Contains(got.StatusText, "already committed") {
+		t.Errorf("outcome summary = %q, want it to say the work was committed before", got.StatusText)
 	}
 }
 
@@ -164,11 +162,8 @@ func TestGtwOutcome_CommitNothingCommitted(t *testing.T) {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
-		"reason": "nothing_to_commit",
-		"branch": "wt-clean",
-	})
-	assertError(t, got)
+	assertOutcome(t, got, http.StatusOK, map[string]string{"branch": "wt-clean"})
+	assertNoError(t, got)
 }
 
 // TestGtwOutcome_CommitAheadOfTheDefaultBranch covers the fallback
@@ -200,10 +195,7 @@ func TestGtwOutcome_CommitAheadOfTheDefaultBranch(t *testing.T) {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
-		"reason":     "nothing_to_commit",
-		"commit_log": "abc1234 feat: the work",
-	})
+	assertOutcome(t, got, http.StatusOK, map[string]string{"commit_log": "abc1234 feat: the work"})
 	assertNoError(t, got)
 }
 
@@ -231,10 +223,7 @@ func TestGtwOutcome_PushAlreadyOnRemote(t *testing.T) {
 		t.Fatalf("dispatchPush: %v", err)
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
-		"reason": "nothing_to_push",
-		"branch": "wt-clean",
-	})
+	assertOutcome(t, got, http.StatusOK, map[string]string{"branch": "wt-clean"})
 	assertNoError(t, got)
 }
 
@@ -263,10 +252,7 @@ func TestGtwOutcome_PushBehindTheRemote(t *testing.T) {
 		t.Fatalf("dispatchPush: %v", err)
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
-		"reason": "nothing_to_push",
-		"branch": "wt-clean",
-	})
+	assertOutcome(t, got, http.StatusOK, map[string]string{"branch": "wt-clean"})
 	assertNoError(t, got)
 }
 
@@ -292,10 +278,7 @@ func TestGtwOutcome_PushLocalAheadOfRemote(t *testing.T) {
 		t.Fatalf("dispatchPush: %v", err)
 	}
 	got := p.settle(t)
-	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
-		"reason": "nothing_to_push",
-		"branch": "wt-clean",
-	})
+	assertOutcome(t, got, http.StatusConflict, map[string]string{"branch": "wt-clean"})
 	assertError(t, got)
 }
 
@@ -323,10 +306,7 @@ func TestGtwOutcome_PRExistsIsANormalBranch(t *testing.T) {
 	work.Release()
 
 	got := settledOutcomeOf(ch)
-	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
-		"reason":    "pr_exists",
-		"pr_number": "42",
-	})
+	assertOutcome(t, got, http.StatusOK, map[string]string{"pr_number": "42"})
 	assertNoError(t, got)
 }
 
@@ -343,11 +323,8 @@ func TestJudgeFixWork_CountsWhatTheAgentLeftBehind(t *testing.T) {
 
 	// Nothing yet: the agent left the worktree unchanged.
 	got := judgeFixWork(context.Background(), deps, repo, "main", repo, base, nil)
-	if got.Status != messages.OutcomeFailed {
-		t.Fatalf("outcome = %+v, want failed — the agent produced nothing", got)
-	}
-	if got.Data["reason"] != "no_changes" {
-		t.Errorf("outcome reason = %q, want no_changes", got.Data["reason"])
+	if got.Status != http.StatusInternalServerError {
+		t.Errorf("outcome status = %d, want %d", got.Status, http.StatusInternalServerError)
 	}
 	assertError(t, &got)
 
@@ -356,7 +333,7 @@ func TestJudgeFixWork_CountsWhatTheAgentLeftBehind(t *testing.T) {
 		t.Fatalf("write new.go: %v", err)
 	}
 	got = judgeFixWork(context.Background(), deps, repo, "main", repo, base, nil)
-	if got.Status != messages.OutcomeOK {
+	if got.Status != http.StatusOK {
 		t.Fatalf("outcome = %+v, want ok — the agent produced a file", got)
 	}
 	if got.Data["changes"] != "1" || got.Data["untracked"] != "1" {
@@ -382,14 +359,14 @@ func TestJudgeFixWork_CountsTheAgentsCommits(t *testing.T) {
 	mustGit(t, repo, "-c", "user.name=nightme-gtw", "-c", "user.email=gtw@localhost",
 		"commit", "--allow-empty", "-m", "gtw: ignore .nightme/")
 	got := judgeFixWork(context.Background(), deps, repo, "main", repo, base, nil)
-	if got.Status != messages.OutcomeFailed {
+	if got.Status != http.StatusInternalServerError {
 		t.Fatalf("outcome = %+v, want failed — only gtw's own commit is on the branch", got)
 	}
 
 	// The agent's commit: the work landed.
 	mustGit(t, repo, "commit", "--allow-empty", "-m", "feat: the work")
 	got = judgeFixWork(context.Background(), deps, repo, "main", repo, base, nil)
-	if got.Status != messages.OutcomeOK {
+	if got.Status != http.StatusOK {
 		t.Fatalf("outcome = %+v, want ok — the agent committed", got)
 	}
 	if got.Data["commits"] != "1" {

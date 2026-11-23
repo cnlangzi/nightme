@@ -12,6 +12,7 @@ package stop_test
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"testing"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/command"
 	stoppkg "github.com/cnlangzi/nightme/internal/command/stop"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // outcomeEmitter records the outbound messages of a chat session —
@@ -36,7 +38,7 @@ func (e *outcomeEmitter) Send(_ context.Context, m messages.OutboundMessage) (st
 	return "", nil
 }
 
-func (e *outcomeEmitter) settled() *messages.Outcome {
+func (e *outcomeEmitter) settled() *outcome.Outcome {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, m := range e.sent {
@@ -49,7 +51,7 @@ func (e *outcomeEmitter) settled() *messages.Outcome {
 
 // runStop runs /stop against the given chat and returns the outcome
 // it reported.
-func runStop(t *testing.T, cs *chatsession.ChatSession) *messages.Outcome {
+func runStop(t *testing.T, cs *chatsession.ChatSession) *outcome.Outcome {
 	t.Helper()
 	em := &outcomeEmitter{}
 	cs.WithEmitter(em)
@@ -79,7 +81,7 @@ func TestStopOutcome(t *testing.T) {
 		if got == nil {
 			t.Fatal("no settled outcome: /stop reported nothing")
 		}
-		if got.Status != messages.OutcomeOK {
+		if got.Status != http.StatusOK {
 			t.Fatalf("outcome = %+v, want ok", got)
 		}
 		if got.Data["agent"] != "claude" {
@@ -93,7 +95,7 @@ func TestStopOutcome(t *testing.T) {
 		if got == nil {
 			t.Fatal("no settled outcome: /stop reported nothing")
 		}
-		if got.Status != messages.OutcomeNoop {
+		if got.Status != http.StatusOK {
 			t.Fatalf("outcome = %+v, want noop", got)
 		}
 	})
@@ -112,11 +114,8 @@ func TestStopOutcome(t *testing.T) {
 		if got == nil {
 			t.Fatal("no settled outcome: /stop reported nothing")
 		}
-		if got.Status != messages.OutcomeFailed {
-			t.Fatalf("outcome = %+v, want failed", got)
-		}
-		if got.Data["reason"] != "no_agent" {
-			t.Errorf("outcome reason = %q, want no_agent", got.Data["reason"])
+		if got.Status != http.StatusBadRequest {
+			t.Errorf("outcome status = %d, want %d", got.Status, http.StatusBadRequest)
 		}
 	})
 
@@ -127,11 +126,8 @@ func TestStopOutcome(t *testing.T) {
 		if got == nil {
 			t.Fatal("no settled outcome: /stop reported nothing")
 		}
-		if got.Status != messages.OutcomeFailed {
-			t.Fatalf("outcome = %+v, want failed", got)
-		}
-		if got.Data["reason"] != "not_supported" {
-			t.Errorf("outcome reason = %q, want not_supported", got.Data["reason"])
+		if got.Status != http.StatusNotImplemented {
+			t.Errorf("outcome status = %d, want %d", got.Status, http.StatusNotImplemented)
 		}
 	})
 }

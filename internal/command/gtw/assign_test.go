@@ -10,6 +10,7 @@ package gtw
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,6 +21,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // assignRig is the /gtw assign test rig: a git repo with an origin
@@ -88,12 +90,12 @@ func (r *assignRig) drive(t *testing.T, args ...string) string {
 
 // settle releases the message's work and returns the outcome the
 // command reported.
-func (r *assignRig) settle(t *testing.T) *messages.Outcome {
+func (r *assignRig) settle(t *testing.T) *outcome.Outcome {
 	t.Helper()
 	r.work.Release()
 	r.rec.mu.Lock()
 	defer r.rec.mu.Unlock()
-	var out *messages.Outcome
+	var out *outcome.Outcome
 	for _, m := range r.rec.sends {
 		if m.Kind != messages.OutMessageSettled {
 			continue
@@ -278,7 +280,7 @@ func TestAssign_CatalogCheckFailsOnAdd(t *testing.T) {
 		t.Errorf("AddIssueLabel calls = %+v, want 0 (the check failed first)", calls)
 	}
 	got := rig.settle(t)
-	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{"reason": "label_error"})
+	assertOutcome(t, got, http.StatusServiceUnavailable, nil)
 }
 
 // TestAssign_CatalogCheckWarnsOnRemove pins that a failing catalog
@@ -301,7 +303,7 @@ func TestAssign_CatalogCheckWarnsOnRemove(t *testing.T) {
 		t.Errorf("reply must name the failed check:\n%s", last)
 	}
 	got := rig.settle(t)
-	assertOutcome(t, got, messages.OutcomeOK, map[string]string{"action": "removed"})
+	assertOutcome(t, got, http.StatusOK, map[string]string{"action": "removed"})
 }
 
 // TestAssign_LabelWriteFailure_ReportsLabelError pins the reason
@@ -326,7 +328,7 @@ func TestAssign_LabelWriteFailure_ReportsLabelError(t *testing.T) {
 			rig.drive(t, tc.args...)
 
 			got := rig.settle(t)
-			assertOutcome(t, got, messages.OutcomeFailed, map[string]string{"reason": "label_error"})
+			assertOutcome(t, got, http.StatusServiceUnavailable, nil)
 		})
 	}
 }
@@ -385,7 +387,7 @@ func TestAssign_UnknownIssue(t *testing.T) {
 		t.Errorf("AddIssueLabel unexpectedly called: %+v", calls)
 	}
 	got := rig.settle(t)
-	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{"reason": "issue_not_found"})
+	assertOutcome(t, got, http.StatusNotFound, nil)
 }
 
 // TestAssign_OutcomeData pins the facts a program reads: the issue,
@@ -407,10 +409,10 @@ func TestAssign_OutcomeData(t *testing.T) {
 			rig.drive(t, tc.args...)
 
 			got := rig.settle(t)
-			assertOutcome(t, got, messages.OutcomeOK, map[string]string{
-				"issue":  "42",
-				"url":    "https://github.com/cnlangzi/nightme/issues/42",
-				"action": tc.action,
+			assertOutcome(t, got, http.StatusOK, map[string]string{
+				"issue":     "42",
+				"issue_url": "https://github.com/cnlangzi/nightme/issues/42",
+				"action":    tc.action,
 			})
 		})
 	}
@@ -435,7 +437,7 @@ func TestAssign_UsageError(t *testing.T) {
 				t.Errorf("provider called for an invalid command line: %+v", calls)
 			}
 			got := rig.settle(t)
-			assertOutcome(t, got, messages.OutcomeFailed, map[string]string{"reason": "usage"})
+			assertOutcome(t, got, http.StatusBadRequest, nil)
 		})
 	}
 }

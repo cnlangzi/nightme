@@ -3,12 +3,14 @@ package me
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -73,10 +75,11 @@ func TestStop_PostsTheRecordOfTheSession(t *testing.T) {
 		decisionResp("jev", optionEscalate, 0.1, 0),
 	}}
 	svc, op := testService(t, dir, Config{Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "the issue is claimed by another run",
-		Data:    map[string]string{"reason": "issue_claimed"},
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the issue is claimed by another run",
+		Data:       map[string]string{"reason": "issue_claimed"},
 	}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -134,7 +137,7 @@ func TestStop_PostsTheRecordOfTheSession(t *testing.T) {
 		"actions:  1 (1 failed)",
 		"steps:    1 ran · 0 not run",
 		"errors:",
-		"└─ [ ! ] /gtw commit — failed: the issue is claimed by another run (reason: issue_claimed)",
+		"└─ [ ! ] /gtw commit — 500: the issue is claimed by another run",
 		"decisions:",
 		"└─ the decision model — escalate (p=0.10)",
 	} {
@@ -177,9 +180,10 @@ func TestStop_TwiceLeavesTheCardOfTheFirstStop(t *testing.T) {
 		decisionResp("jev", optionEscalate, 0.1, 0),
 	}}
 	svc, op := testService(t, dir, Config{Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "the step failed",
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the step failed",
 	}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -296,9 +300,10 @@ func TestTheRecordOfAFailedRunSaysWhyItFailed(t *testing.T) {
 
 	decider := &scriptedDecider{err: errors.New("the decision model is gone")}
 	svc, op := testService(t, dir, Config{Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "the step failed",
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the step failed",
 	}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -327,9 +332,10 @@ func TestStop_EndsTheRunSessionWithItsPhase(t *testing.T) {
 		decisionResp("jev", optionEscalate, 0.1, 0),
 	}}
 	svc, op := testService(t, dir, Config{Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "the step failed",
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the step failed",
 	}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -405,9 +411,10 @@ func TestTheRecordListsOnlyTheActionsThatWentWrong(t *testing.T) {
 	svc, op := testService(t, dir, Config{Decider: decider})
 	op.steps = []fakeStep{
 		okStep("the fix landed"),
-		{outcome: messages.Outcome{
-			Status:  messages.OutcomeFailed,
-			Summary: "the commit failed",
+		{outcome: outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "the commit failed",
 		}},
 	}
 
@@ -431,7 +438,7 @@ func TestTheRecordListsOnlyTheActionsThatWentWrong(t *testing.T) {
 	if strings.Contains(body, "/gtw fix 1 -y —") {
 		t.Errorf("the record lists an action that went well:\n%s", body)
 	}
-	if !strings.Contains(body, "└─ [ ! ] /gtw commit — failed: the commit failed") {
+	if !strings.Contains(body, "└─ [ ! ] /gtw commit — 500: the commit failed") {
 		t.Errorf("the record does not list the action that failed:\n%s", body)
 	}
 }
@@ -461,7 +468,7 @@ func TestTheRecordCapsTheErrorsAndTheDecisions(t *testing.T) {
 			Kind:    wfe.ActionKindRun,
 			Command: "/gtw commit",
 			StepID:  "commit",
-			Outcome: wfe.Outcome{Status: wfe.OutcomeFailed, Summary: "it failed"},
+			Outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "it failed"},
 		})
 	}
 	for i := 0; i < 23; i++ {
@@ -541,10 +548,11 @@ func TestTheRecordClipsItsRows(t *testing.T) {
 		Kind:    wfe.ActionKindRun,
 		Command: "/gtw build",
 		StepID:  "commit",
-		Outcome: wfe.Outcome{
-			Status:  wfe.OutcomeFailed,
-			Summary: strings.Repeat("build log ", 100),
-			Data:    map[string]string{"reason": "agent_error"},
+		Outcome: outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: strings.Repeat("build log ", 100),
+			Data:       map[string]string{"reason": "agent_error"},
 		},
 	}}
 	r.wakes = []wakeRecord{{
@@ -559,10 +567,10 @@ func TestTheRecordClipsItsRows(t *testing.T) {
 			t.Errorf("a line of the record is %d runes long, want at most %d: %q", n, maxSummaryLine, line)
 		}
 	}
-	// The reason code is the machine-readable part of the row: the cut
+	// The status is the machine-readable part of the row: the cut
 	// must not swallow it.
-	if !strings.Contains(body, "reason: agent_error") {
-		t.Errorf("the record lost the reason code:\n%s", body)
+	if !strings.Contains(body, "— 500:") {
+		t.Errorf("the record lost the status:\n%s", body)
 	}
 }
 
@@ -602,9 +610,10 @@ func TestTheWakeLogHoldsOneRecordPerModelCall(t *testing.T) {
 		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
 	}}
 	svc, op := testService(t, dir, Config{Decider: decider, Provider: provider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "the step failed",
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the step failed",
 	}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{

@@ -3,6 +3,8 @@ package wfe
 import (
 	"fmt"
 	"strings"
+
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // Policy is the constraint policy over a bound workflow and the
@@ -225,7 +227,7 @@ func (p *Policy) CheckFinish(status string) error {
 			return fmt.Errorf("the last step has not run yet")
 		}
 		if !out.Succeeded() {
-			return fmt.Errorf("the last step %q finished as %q: it must be ok or noop", stepID, out.Status)
+			return fmt.Errorf("the last step %q finished with status %d: it must be a success", stepID, out.Status)
 		}
 		return nil
 	default:
@@ -419,28 +421,16 @@ func (p *Policy) actionWorked(rec ActionRecord) bool {
 
 // runWorked reports whether a step that ran produced work.
 //
-// A wait is a pause, not a result: the step reports ok and the round
-// it sits in says nothing.
+// A step that was passed over did not run, and a wait is a pause, not
+// a result: the round it sits in says nothing. Every other step ran,
+// and a round that ran is a round the operator reads about — it either
+// did the work or it broke.
 func (p *Policy) runWorked(rec ActionRecord) bool {
-	if step := StepByID(p.Workflow, rec.StepID); step != nil && step.Kind() == StepKindWait {
+	if rec.Skipped {
 		return false
 	}
-	return outcomeWorked(rec.Outcome)
-}
-
-// outcomeWorked reports whether an outcome says the work got done.
-//
-// The normal branches of the outcome contract say the request was
-// valid and there was nothing to do: a `noop`, or a `failed` without
-// an error description. The error description is the axis the contract
-// names (see Outcome.Exception); every other outcome says the world
-// moved, and a breakage is worth seeing.
-func outcomeWorked(out Outcome) bool {
-	switch out.Status {
-	case OutcomeNoop:
+	if step := StepByID(p.Workflow, rec.StepID); step != nil && step.Kind() == StepKindWait {
 		return false
-	case OutcomeFailed:
-		return out.Data[OutcomeKeyError] != ""
 	}
 	return true
 }
@@ -487,7 +477,7 @@ func recordRound(rec ActionRecord) int {
 //
 // The history is in order, so the last run record carries the latest
 // outcome of the last executed step.
-func (p *Policy) lastExecuted() (string, Outcome, bool) {
+func (p *Policy) lastExecuted() (string, outcome.Outcome, bool) {
 	for i := len(p.History) - 1; i >= 0; i-- {
 		rec := p.History[i]
 		if rec.Kind != ActionKindRun {
@@ -495,7 +485,7 @@ func (p *Policy) lastExecuted() (string, Outcome, bool) {
 		}
 		return rec.StepID, rec.Outcome, true
 	}
-	return "", Outcome{}, false
+	return "", outcome.Outcome{}, false
 }
 
 // steps returns the workflow's steps, tolerating a missing workflow.

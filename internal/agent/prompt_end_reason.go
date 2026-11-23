@@ -1,5 +1,11 @@
 package agent
 
+import (
+	"net/http"
+
+	"github.com/cnlangzi/nightme/pkg/outcome"
+)
+
 // PromptEndReason is the WHY of a Prompt terminating. Universal
 // vocabulary consumed by every rendering layer (Feishu / Telegram /
 // Slack / future Web) to paint the terminal marker — ❌ for any
@@ -77,4 +83,26 @@ func (r PromptEndReason) String() string {
 		return "user-stopped"
 	}
 	return "unknown"
+}
+
+// Status maps the reason onto the HTTP status of the outcome the turn
+// produces.
+//
+// A clean turn is a success, a turn the operator stopped is a
+// cancellation, a turn that ran out of time is a timeout, and a turn
+// that broke or died is a failure.
+//
+// The upstream's own status — a 429 from the API — is not in this
+// table: it rides on the error the turn reported, and the caller
+// prefers it over what the reason says.
+func (r PromptEndReason) Status() int {
+	switch r {
+	case PromptEndClean:
+		return http.StatusOK
+	case PromptEndStalledKilled:
+		return http.StatusRequestTimeout
+	case PromptEndUserKilled, PromptEndUserStopped:
+		return outcome.StatusClientClosedRequest
+	}
+	return http.StatusInternalServerError
 }

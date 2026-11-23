@@ -10,6 +10,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // Factory implements command.SlashCommandFactory for /wf.
@@ -122,7 +123,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	}
 
 	if f.dir == "" {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("no_workflows_dir",
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusNotFound,
 			"the daemon has no workflows directory"))
 		return &command.SlashOutput{
 			Reply:    "❌ This daemon has no workflows directory.",
@@ -158,7 +159,7 @@ func specFor(argv []string) (command.CmdSpec, error) {
 
 // usageError answers a command line that does not fit.
 func usageError(ctx context.Context, err error) *command.SlashOutput {
-	chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+	chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 	return &command.SlashOutput{
 		Reply:    fmt.Sprintf("❌ %v", err),
 		Consumed: true,
@@ -177,9 +178,9 @@ func (f *Factory) runInstall(ctx context.Context, cs *chatsession.ChatSession,
 		list.set(rowValidate, agent.TaskSkipped, "")
 		list.set(rowInstall, agent.TaskSkipped, "")
 		_ = list.send()
-		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(ReasonInvalidAddress,
-			"the address is not valid",
-			map[string]string{"address": address}, err.Error()))
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(http.StatusBadRequest,
+			err.Error(),
+			map[string]string{KeyAddress: address}))
 		return &command.SlashOutput{Consumed: true}, nil
 	}
 
@@ -199,9 +200,9 @@ func (f *Factory) runUninstall(ctx context.Context, cs *chatsession.ChatSession,
 		list := newRemovalChecklist("remove "+address, f.emitter(ctx, cs, input.ChatID, input.MessageID))
 		list.set(rowRemove, agent.TaskFailed, err.Error())
 		_ = list.send()
-		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(ReasonInvalidAddress,
-			"the address is not valid",
-			map[string]string{"address": address}, err.Error()))
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(http.StatusBadRequest,
+			err.Error(),
+			map[string]string{KeyAddress: address}))
 		return &command.SlashOutput{Consumed: true}, nil
 	}
 
@@ -225,25 +226,26 @@ func (f *Factory) report(ctx context.Context, addr Address, result Result) {
 	}
 	switch result.Reason {
 	case ReasonInstalled, ReasonUpdated:
-		chatsession.ReportOutcome(ctx, messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "the workflow " + addr.String() + " is " + result.Reason,
-			Data:    data,
+		chatsession.ReportOutcome(ctx, outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "the workflow " + addr.String() + " is " + result.Reason,
+			Data:       data,
 		})
 	case ReasonSkipped:
 		// The workflow was already there: the request was valid and
 		// there was nothing to fetch.
-		chatsession.ReportOutcome(ctx, command.NoopOutcome(
+		chatsession.ReportOutcome(ctx, command.SuccessOutcome(
 			"the workflow "+addr.String()+" is already installed — /wf install -f overwrites it", data))
 	case ReasonUnchanged:
 		// The workflow was already current: the request was valid and
 		// there was nothing to write.
-		chatsession.ReportOutcome(ctx, command.NoopOutcome(
+		chatsession.ReportOutcome(ctx, command.SuccessOutcome(
 			"the workflow "+addr.String()+" is already current", data))
 	default:
-		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(result.Reason,
-			"the workflow "+addr.String()+" was not installed",
-			data, result.Detail))
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(installStatus(result.Reason),
+			"the workflow "+addr.String()+" was not installed: "+result.Detail,
+			data))
 	}
 }
 
@@ -255,28 +257,56 @@ func (f *Factory) reportUninstall(ctx context.Context, addr Address, result Resu
 	data := outcomeData(result)
 	switch result.Reason {
 	case ReasonUninstalled:
-		chatsession.ReportOutcome(ctx, messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "the workflow " + addr.String() + " is uninstalled",
-			Data:    data,
+		chatsession.ReportOutcome(ctx, outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: "the workflow " + addr.String() + " is uninstalled",
+			Data:       data,
 		})
 	case ReasonNotInstalled:
 		// There was nothing to remove: the request was valid and the
 		// workflow was already gone.
-		chatsession.ReportOutcome(ctx, command.NoopOutcome(
+		chatsession.ReportOutcome(ctx, command.SuccessOutcome(
 			"the workflow "+addr.String()+" is not installed", data))
 	default:
-		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(result.Reason,
-			"the workflow "+addr.String()+" was not uninstalled",
-			data, result.Detail))
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(uninstallStatus(result.Reason),
+			"the workflow "+addr.String()+" was not uninstalled: "+result.Detail,
+			data))
 	}
+}
+
+// installStatus maps the reason an install came to onto the status of
+// the outcome that reports it.
+//
+// The workflow is not there (404), the address or the file does not
+// fit (400), no tier could serve it (503), or it could not be
+// written (500).
+func installStatus(reason string) int {
+	switch reason {
+	case ReasonNotFound:
+		return http.StatusNotFound
+	case ReasonInvalidAddress, ReasonInvalidContent:
+		return http.StatusBadRequest
+	case ReasonUnreachable:
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusInternalServerError
+}
+
+// uninstallStatus maps the reason an uninstall came to onto the status
+// of the outcome that reports it.
+func uninstallStatus(reason string) int {
+	if reason == ReasonNotFound {
+		return http.StatusNotFound
+	}
+	return http.StatusInternalServerError
 }
 
 // outcomeData builds the machine-readable facts of an outcome.
 //
-// The reason is the verdict; the path is where the workflow is.
+// The path is where the workflow is.
 func outcomeData(result Result) map[string]string {
-	data := map[string]string{"reason": result.Reason}
+	data := map[string]string{}
 	if result.Path != "" {
 		data["path"] = result.Path
 	}

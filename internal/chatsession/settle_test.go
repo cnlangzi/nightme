@@ -2,12 +2,14 @@ package chatsession
 
 import (
 	"context"
+	"net/http"
 	"strconv"
 	"sync"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // recordingEmitter captures the outbound messages a ChatSession
@@ -55,7 +57,7 @@ func TestHold_NestedHoldsEmitOnceAfterLastRelease(t *testing.T) {
 		t.Fatal("Hold returned different Works for the same msgID")
 	}
 
-	w1.Report(messages.Outcome{Status: messages.OutcomeOK, Summary: "done"})
+	w1.Report(outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "done"})
 	w1.Release()
 	if got := em.settled(); len(got) != 0 {
 		t.Fatalf("settled emitted %d times before the last release", len(got))
@@ -69,7 +71,7 @@ func TestHold_NestedHoldsEmitOnceAfterLastRelease(t *testing.T) {
 	if got[0].ReplyTo != "m1" {
 		t.Errorf("settled ReplyTo = %q, want %q", got[0].ReplyTo, "m1")
 	}
-	if got[0].Outcome == nil || got[0].Outcome.Status != messages.OutcomeOK {
+	if got[0].Outcome == nil || got[0].Outcome.Status != http.StatusOK {
 		t.Errorf("settled outcome = %+v, want ok", got[0].Outcome)
 	}
 }
@@ -113,7 +115,7 @@ func TestHold_UnreportedSettlesUnknown(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("settled emitted %d times, want 1", len(got))
 	}
-	if got[0].Outcome == nil || got[0].Outcome.Status != messages.OutcomeUnknown {
+	if got[0].Outcome == nil || got[0].Outcome.Status != 0 {
 		t.Errorf("settled outcome = %+v, want unknown", got[0].Outcome)
 	}
 }
@@ -124,14 +126,14 @@ func TestHoldUntilPromptEnd_MapsReason(t *testing.T) {
 	cases := []struct {
 		name   string
 		reason agent.PromptEndReason
-		want   messages.OutcomeStatus
+		want   int
 	}{
-		{"clean", agent.PromptEndClean, messages.OutcomeOK},
-		{"user stopped", agent.PromptEndUserStopped, messages.OutcomeCancelled},
-		{"user killed", agent.PromptEndUserKilled, messages.OutcomeCancelled},
-		{"error", agent.PromptEndError, messages.OutcomeFailed},
-		{"process died", agent.PromptEndProcessDied, messages.OutcomeFailed},
-		{"stalled", agent.PromptEndStalledKilled, messages.OutcomeFailed},
+		{"clean", agent.PromptEndClean, http.StatusOK},
+		{"user stopped", agent.PromptEndUserStopped, outcome.StatusClientClosedRequest},
+		{"user killed", agent.PromptEndUserKilled, outcome.StatusClientClosedRequest},
+		{"error", agent.PromptEndError, http.StatusInternalServerError},
+		{"process died", agent.PromptEndProcessDied, http.StatusInternalServerError},
+		{"stalled", agent.PromptEndStalledKilled, http.StatusRequestTimeout},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -150,20 +152,17 @@ func TestHoldUntilPromptEnd_MapsReason(t *testing.T) {
 				t.Fatalf("settled emitted %d times, want 1", len(got))
 			}
 			if got[0].Outcome == nil || got[0].Outcome.Status != tc.want {
-				t.Errorf("settled status = %+v, want %s", got[0].Outcome, tc.want)
+				t.Errorf("settled status = %+v, want %d", got[0].Outcome, tc.want)
 			}
-			if got[0].Outcome.Data["end_reason"] == "" {
-				t.Error("settled outcome has no end_reason")
+			// The status says which branch the turn took: a 2xx is a
+			// normal result, everything else is an exception.
+			wantException := tc.want < 200 || tc.want >= 300
+			if got[0].Outcome.Exception() != wantException {
+				t.Errorf("the settled outcome is an exception = %v, want %v",
+					got[0].Outcome.Exception(), wantException)
 			}
-			// A turn that broke carries the error description: its
-			// presence is what tells a consumer that the outcome is an
-			// exception rather than a normal result.
-			desc := got[0].Outcome.Data[messages.OutcomeKeyError]
-			if tc.want == messages.OutcomeFailed && desc == "" {
-				t.Error("the settled outcome has no error description")
-			}
-			if tc.want != messages.OutcomeFailed && desc != "" {
-				t.Errorf("the settled outcome carries the error description %q, want none", desc)
+			if got[0].Outcome.StatusText == "" {
+				t.Error("the settled outcome says nothing")
 			}
 		})
 	}
@@ -186,8 +185,8 @@ func TestQueueUserMessage_HoldsUntilPromptEnd(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("settled emitted %d times, want 1", len(got))
 	}
-	if got[0].Outcome.Status != messages.OutcomeOK {
-		t.Errorf("settled status = %s, want ok", got[0].Outcome.Status)
+	if got[0].Outcome.Status != http.StatusOK {
+		t.Errorf("settled status = %d, want 200", got[0].Outcome.Status)
 	}
 }
 
@@ -217,7 +216,7 @@ func TestQueueUserMessage_BatchedMessagesAllSettle(t *testing.T) {
 	seen := map[string]bool{}
 	for _, g := range got {
 		seen[g.ReplyTo] = true
-		if g.Outcome == nil || g.Outcome.Status != messages.OutcomeOK {
+		if g.Outcome == nil || g.Outcome.Status != http.StatusOK {
 			t.Errorf("settled %q outcome = %+v, want ok", g.ReplyTo, g.Outcome)
 		}
 	}
@@ -251,8 +250,8 @@ func TestQueueUserMessage_QueueFullSettles(t *testing.T) {
 	if got[0].ReplyTo != "overflow" {
 		t.Errorf("settled ReplyTo = %q, want overflow", got[0].ReplyTo)
 	}
-	if got[0].Outcome == nil || got[0].Outcome.Status != messages.OutcomeFailed {
-		t.Errorf("settled outcome = %+v, want failed", got[0].Outcome)
+	if got[0].Outcome == nil || got[0].Outcome.Status != http.StatusServiceUnavailable {
+		t.Errorf("settled outcome = %+v, want a full queue", got[0].Outcome)
 	}
 
 	cs.workMu.Lock()
@@ -270,19 +269,19 @@ func TestReportOutcome_UsesContextWork(t *testing.T) {
 
 	w := cs.Hold("m1")
 	ctx := WithWork(context.Background(), w)
-	ReportOutcome(ctx, messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to do"})
+	ReportOutcome(ctx, outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "nothing to do"})
 	w.Release()
 
 	got := em.settled()
 	if len(got) != 1 {
 		t.Fatalf("settled emitted %d times, want 1", len(got))
 	}
-	if got[0].Outcome.Status != messages.OutcomeNoop {
-		t.Errorf("settled status = %s, want noop", got[0].Outcome.Status)
+	if got[0].Outcome.Status != http.StatusOK {
+		t.Errorf("settled status = %d, want 200", got[0].Outcome.Status)
 	}
 
 	// No work on the context — a no-op, not a panic.
-	ReportOutcome(context.Background(), messages.Outcome{Status: messages.OutcomeFailed})
+	ReportOutcome(context.Background(), outcome.Outcome{Status: http.StatusInternalServerError})
 }
 
 // TestReportOutcome_MergesWithCommandOutcome checks that a command's
@@ -293,7 +292,7 @@ func TestReportOutcome_MergesWithCommandOutcome(t *testing.T) {
 
 	w := cs.Hold("m1")
 	ctx := WithWork(context.Background(), w)
-	ReportOutcome(ctx, messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "1/3 groups unfinished"})
+	ReportOutcome(ctx, outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "1/3 groups unfinished"})
 	cs.PromptEndBus.Publish(PromptEndedEvent{UserMsgID: "m1", Reason: agent.PromptEndClean})
 	w.Release()
 
@@ -301,11 +300,11 @@ func TestReportOutcome_MergesWithCommandOutcome(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("settled emitted %d times, want 1", len(got))
 	}
-	if got[0].Outcome.Status != messages.OutcomeIncomplete {
-		t.Errorf("settled status = %s, want incomplete", got[0].Outcome.Status)
+	if got[0].Outcome.Status != http.StatusInternalServerError {
+		t.Errorf("settled status = %d, want 500", got[0].Outcome.Status)
 	}
-	if got[0].Outcome.Summary != "1/3 groups unfinished" {
-		t.Errorf("settled summary = %q, want %q", got[0].Outcome.Summary, "1/3 groups unfinished")
+	if got[0].Outcome.StatusText != "1/3 groups unfinished" {
+		t.Errorf("settled summary = %q, want %q", got[0].Outcome.StatusText, "1/3 groups unfinished")
 	}
 }
 
@@ -335,7 +334,7 @@ func TestSetSelectedCwd_DroppedMessagesSettle(t *testing.T) {
 	if got[0].ReplyTo != "m1" {
 		t.Errorf("settled ReplyTo = %q, want m1", got[0].ReplyTo)
 	}
-	if got[0].Outcome == nil || got[0].Outcome.Status != messages.OutcomeCancelled {
+	if got[0].Outcome == nil || got[0].Outcome.Status != outcome.StatusClientClosedRequest {
 		t.Errorf("settled outcome = %+v, want cancelled", got[0].Outcome)
 	}
 
@@ -373,19 +372,19 @@ func TestReportPromptEnd_CleanEndDoesNotOverwriteAVerdict(t *testing.T) {
 	cs, em := newSettleSession(t)
 
 	w := cs.Hold("m1")
-	w.Report(messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to push"})
-	w.ReportPromptEnd(agent.PromptEndClean)
+	w.Report(outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "nothing to push"})
+	w.ReportPromptEnd(agent.PromptEndClean, nil)
 	w.Release()
 
 	got := em.settled()
 	if len(got) != 1 {
 		t.Fatalf("settled emitted %d times, want 1", len(got))
 	}
-	if got[0].Outcome.Status != messages.OutcomeNoop {
-		t.Errorf("settled status = %s, want noop", got[0].Outcome.Status)
+	if got[0].Outcome.Status != http.StatusOK {
+		t.Errorf("settled status = %d, want 200", got[0].Outcome.Status)
 	}
-	if got[0].Outcome.Summary != "nothing to push" {
-		t.Errorf("settled summary = %q, want %q", got[0].Outcome.Summary, "nothing to push")
+	if got[0].Outcome.StatusText != "nothing to push" {
+		t.Errorf("settled summary = %q, want %q", got[0].Outcome.StatusText, "nothing to push")
 	}
 }
 
@@ -396,16 +395,16 @@ func TestReportPromptEnd_FailedEndOverwritesAVerdict(t *testing.T) {
 	cs, em := newSettleSession(t)
 
 	w := cs.Hold("m1")
-	w.Report(messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to push"})
-	w.ReportPromptEnd(agent.PromptEndError)
+	w.Report(outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "nothing to push"})
+	w.ReportPromptEnd(agent.PromptEndError, nil)
 	w.Release()
 
 	got := em.settled()
 	if len(got) != 1 {
 		t.Fatalf("settled emitted %d times, want 1", len(got))
 	}
-	if got[0].Outcome.Status != messages.OutcomeFailed {
-		t.Errorf("settled status = %s, want failed", got[0].Outcome.Status)
+	if got[0].Outcome.Status != http.StatusInternalServerError {
+		t.Errorf("settled status = %d, want 500", got[0].Outcome.Status)
 	}
 }
 
@@ -431,7 +430,7 @@ func TestDropQueue_ReleasesEveryHold(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("settled emitted %d times, want 1", len(got))
 	}
-	if got[0].Outcome == nil || got[0].Outcome.Status != messages.OutcomeCancelled {
+	if got[0].Outcome == nil || got[0].Outcome.Status != outcome.StatusClientClosedRequest {
 		t.Errorf("settled outcome = %+v, want cancelled", got[0].Outcome)
 	}
 

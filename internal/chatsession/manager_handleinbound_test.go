@@ -2,6 +2,7 @@ package chatsession
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
@@ -322,8 +323,8 @@ func TestManager_HandleInbound_NoWorkspaceSettlesFailed(t *testing.T) {
 	if got[0].ReplyTo != "om_nocwd_1" {
 		t.Errorf("settled ReplyTo = %q, want om_nocwd_1", got[0].ReplyTo)
 	}
-	if got[0].Outcome == nil || got[0].Outcome.Status != messages.OutcomeFailed {
-		t.Errorf("settled outcome = %+v, want failed", got[0].Outcome)
+	if got[0].Outcome == nil || got[0].Outcome.Status != http.StatusBadRequest {
+		t.Errorf("settled outcome = %+v, want a bad request", got[0].Outcome)
 	}
 }
 
@@ -354,7 +355,7 @@ func TestManager_HandleInbound_WatchDropSettlesNoop(t *testing.T) {
 	if got[0].ReplyTo != "om_watch_1" {
 		t.Errorf("settled ReplyTo = %q, want om_watch_1", got[0].ReplyTo)
 	}
-	if got[0].Outcome == nil || got[0].Outcome.Status != messages.OutcomeNoop {
+	if got[0].Outcome == nil || got[0].Outcome.Status != http.StatusOK {
 		t.Errorf("settled outcome = %+v, want noop", got[0].Outcome)
 	}
 }

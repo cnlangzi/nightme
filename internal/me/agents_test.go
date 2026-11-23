@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,53 +13,57 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
-// brokenStep is a command that broke: it carries the error
-// description the plan reads.
+// brokenStep is a command that broke: its status says so.
 func brokenStep(summary string) fakeStep {
-	return fakeStep{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: summary,
-		Data:    map[string]string{messages.OutcomeKeyError: summary},
+	return fakeStep{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: summary,
 	}}
 }
 
 // cancelledStep is a command the run stopped.
 func cancelledStep(summary string) fakeStep {
-	return fakeStep{outcome: messages.Outcome{
-		Status:  messages.OutcomeCancelled,
-		Summary: summary,
+	return fakeStep{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     outcome.StatusClientClosedRequest,
+		StatusText: summary,
 	}}
 }
 
-// emptyStep is a command that failed without saying why: it is a
-// normal result, not a breakage.
+// emptyStep is a command that had nothing to do: it is a normal
+// result, not a breakage.
 func emptyStep(summary string) fakeStep {
-	return fakeStep{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: summary,
+	return fakeStep{outcome: outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: summary,
 	}}
 }
 
 // unfinishedStep is a command that broke with work left behind: the
 // outcome says how much of it there is.
 func unfinishedStep(summary string, unfinished int) fakeStep {
-	return fakeStep{outcome: messages.Outcome{
-		Status:  messages.OutcomeIncomplete,
-		Summary: summary,
-		Data:    map[string]string{wfe.OutcomeKeyUnfinished: strconv.Itoa(unfinished)},
+	return fakeStep{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: summary,
+		Data:       map[string]string{KeyUnfinished: strconv.Itoa(unfinished)},
 	}}
 }
 
 // throttledStep is a command that broke because the agent was
 // throttled: the outcome says 429 and leaves work behind.
 func throttledStep(summary string, unfinished int) fakeStep {
-	return fakeStep{outcome: messages.Outcome{
-		Status:  messages.OutcomeIncomplete,
-		Summary: summary,
-		Data:    map[string]string{wfe.OutcomeKeyUnfinished: strconv.Itoa(unfinished)},
+	return fakeStep{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusTooManyRequests,
+		StatusText: summary,
+		Data:       map[string]string{KeyUnfinished: strconv.Itoa(unfinished)},
 	}}
 }
 
@@ -239,8 +244,8 @@ jobs:
 	if !ok {
 		t.Fatal("the review step has no outcome")
 	}
-	if out.Status != wfe.OutcomeOK {
-		t.Errorf("the review step ended as %q, want the outcome of the second attempt", out.Status)
+	if out.Status != http.StatusOK {
+		t.Errorf("the review step ended as %d, want the outcome of the second attempt", out.Status)
 	}
 }
 
@@ -273,8 +278,8 @@ jobs:
 	if !ok {
 		t.Fatal("the review step has no outcome")
 	}
-	if out.Status != wfe.OutcomeCancelled {
-		t.Errorf("the review step ended as %q, want the cancelled one", out.Status)
+	if out.Status != outcome.StatusClientClosedRequest {
+		t.Errorf("the review step ended as %d, want the cancelled one", out.Status)
 	}
 }
 
@@ -308,8 +313,8 @@ jobs:
 	if !ok {
 		t.Fatal("the review step has no outcome")
 	}
-	if out.Status != wfe.OutcomeFailed {
-		t.Errorf("the review step ended as %q, want the failed one", out.Status)
+	if out.Status != http.StatusOK {
+		t.Errorf("the review step ended as %d, want the normal one", out.Status)
 	}
 }
 
@@ -342,11 +347,11 @@ jobs:
 	if !ok {
 		t.Fatal("the review step has no outcome")
 	}
-	if out.Status != wfe.OutcomeFailed {
-		t.Errorf("the review step ended as %q, want failed", out.Status)
+	if out.Status != http.StatusInternalServerError {
+		t.Errorf("the review step ended as %d, want failed", out.Status)
 	}
-	if desc := out.Data[wfe.OutcomeKeyError]; desc != "claude broke" {
-		t.Errorf("the step carries the error %q, want the last attempt's", desc)
+	if out.StatusText != "claude broke" {
+		t.Errorf("the step carries the words %q, want the last attempt's", out.StatusText)
 	}
 }
 
@@ -567,8 +572,8 @@ jobs:
 	if !ok {
 		t.Fatal("the review step has no outcome")
 	}
-	if desc := out.Data[wfe.OutcomeKeyError]; !strings.Contains(desc, "resolved to nothing") {
-		t.Errorf("the step carries the error %q, want it to name the empty agent", desc)
+	if !strings.Contains(out.StatusText, "resolved to nothing") {
+		t.Errorf("the step carries the words %q, want them to name the empty agent", out.StatusText)
 	}
 }
 
@@ -682,8 +687,8 @@ jobs:
 	if !ok {
 		t.Fatal("the review step has no outcome")
 	}
-	if !strings.Contains(out.Data[wfe.OutcomeKeyError], "args mode") {
-		t.Errorf("the step carries the error %q, want it to name the args mode", out.Data[wfe.OutcomeKeyError])
+	if !strings.Contains(out.StatusText, "args mode") {
+		t.Errorf("the step carries the words %q, want them to name the args mode", out.StatusText)
 	}
 }
 
@@ -824,8 +829,8 @@ jobs:
 	if !ok {
 		t.Fatal("the review step has no outcome")
 	}
-	if out.Status != wfe.OutcomeOK {
-		t.Errorf("the review step ended as %q, want the outcome of the second attempt", out.Status)
+	if out.Status != http.StatusOK {
+		t.Errorf("the review step ended as %d, want the outcome of the second attempt", out.Status)
 	}
 }
 
@@ -1053,8 +1058,8 @@ jobs:
 	if !ok {
 		t.Fatal("the review step has no outcome")
 	}
-	if out.Status != wfe.OutcomeOK {
-		t.Errorf("the review step ended as %q, want the outcome of the second attempt", out.Status)
+	if out.Status != http.StatusOK {
+		t.Errorf("the review step ended as %d, want the outcome of the second attempt", out.Status)
 	}
 }
 
@@ -1140,8 +1145,8 @@ jobs:
 	if !ok {
 		t.Fatal("the review step has no outcome")
 	}
-	if out.Status != wfe.OutcomeOK {
-		t.Errorf("the review step ended as %q, want the outcome of the second attempt", out.Status)
+	if out.Status != http.StatusOK {
+		t.Errorf("the review step ended as %d, want the outcome of the second attempt", out.Status)
 	}
 }
 

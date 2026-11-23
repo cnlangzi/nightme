@@ -12,13 +12,14 @@ package cwd
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/pathutil"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // Factory is the command.SlashCommandFactory for /cwd.
@@ -102,13 +103,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 
 	parsed, err := command.ParseCmdArgs(input.Args[1:], cwdSpec)
 	if err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
 	raw := strings.TrimSpace(parsed.Arg(0))
 	if raw == "" {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "no path was given"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "no path was given"))
 		return command.Reply(ctx, rt, "Usage: /cwd <path>"), nil
 	}
 	// Multi-line inputs are almost always a paste accident.
@@ -117,7 +118,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// a single-line path, but the user clearly didn't mean
 	// that).
 	if strings.ContainsAny(raw, "\n\r") {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the path spans multiple lines"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the path spans multiple lines"))
 		return command.Reply(ctx, rt, "Path cannot span multiple lines; paste as a single line."), nil
 	}
 
@@ -139,9 +140,9 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// 1. ~ expansion
 	expanded, err := expandTilde(raw)
 	if err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcomeData("error",
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(http.StatusInternalServerError,
 			"the path could not be expanded",
-			map[string]string{"cwd": raw}))
+			map[string]string{KeyCwd: raw}))
 		return command.Reply(ctx, rt, fmt.Sprintf("Cannot expand ~: %v", err)), nil
 	}
 
@@ -153,31 +154,32 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// as relative and would silently join them with $HOME.
 	abs, err := resolvePath(expanded)
 	if err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcomeData("error",
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(http.StatusInternalServerError,
 			"the path could not be resolved",
-			map[string]string{"cwd": rawOriginal}))
+			map[string]string{KeyCwd: rawOriginal}))
 		return command.Reply(ctx, rt, fmt.Sprintf("Cannot resolve path %q: %v", rawOriginal, err)), nil
 	}
 
 	// 3. Existence + directory check, also platform-specific.
 	if err := verifyDirectory(abs, rawOriginal); err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcomeData("error",
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(http.StatusInternalServerError,
 			"the path is not a usable directory",
-			map[string]string{"cwd": rawOriginal}))
+			map[string]string{KeyCwd: rawOriginal}))
 		return command.Reply(ctx, rt, err.Error()), nil
 	}
 
 	if err := cs.SetSelectedCwd(abs); err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcomeData("error",
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(http.StatusInternalServerError,
 			"the workspace could not be set",
-			map[string]string{"cwd": abs}))
+			map[string]string{KeyCwd: abs}))
 		return command.Reply(ctx, rt, fmt.Sprintf("SetSelectedCwd failed: %v", err)), nil
 	}
 
-	chatsession.ReportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: "the workspace was set",
-		Data:    map[string]string{"cwd": abs},
+	chatsession.ReportOutcome(ctx, outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the workspace was set",
+		Data:       map[string]string{KeyCwd: abs},
 	})
 
 	selectedAgent := cs.SelectedAgent()

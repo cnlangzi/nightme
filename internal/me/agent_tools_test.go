@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -377,8 +379,8 @@ jobs:
 	if r.state.Steps[0].Pending {
 		t.Error("the step is marked as running although the command belongs to no step")
 	}
-	if r.state.Steps[0].Outcome.Status != wfe.OutcomeIncomplete {
-		t.Errorf("the step ended as %q, want the verdict it had", r.state.Steps[0].Outcome.Status)
+	if r.state.Steps[0].Outcome.Status != http.StatusInternalServerError {
+		t.Errorf("the step ended as %d, want the verdict it had", r.state.Steps[0].Outcome.Status)
 	}
 }
 
@@ -425,18 +427,19 @@ jobs:
 	}
 	r.setJudgment(`the previous step "commit" ended as "failed"`)
 	r.setJudgmentStep("commit")
-	r.recordStep("main", commit, wfe.Outcome{
-		Status:  wfe.OutcomeFailed,
-		Summary: "the commit failed",
-		Data:    map[string]string{"error": "the commit failed"},
+	r.recordStep("main", commit, outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the commit failed",
+		Data:       map[string]string{"error": "the commit failed"},
 	})
 
 	res, err := svc.toolResume(context.Background(), r, pendingCall{})
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	if res.Status != string(wfe.OutcomeOK) {
-		t.Errorf("the verdict is %q, want the one of the step", res.Status)
+	if res.Status != http.StatusOK {
+		t.Errorf("the verdict is %d, want the one of the step", res.Status)
 	}
 	// The step the judgment was about ran again.
 	ran := false
@@ -505,10 +508,11 @@ jobs:
 		t.Fatal("the workflow has no build step")
 	}
 	r.setJudgmentStep("build")
-	r.recordStep("main", build, wfe.Outcome{
-		Status:  wfe.OutcomeFailed,
-		Summary: "the build failed",
-		Data:    map[string]string{"error": "the build failed"},
+	r.recordStep("main", build, outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the build failed",
+		Data:       map[string]string{"error": "the build failed"},
 	})
 
 	if _, err := svc.toolResume(context.Background(), r, pendingCall{}); err != nil {
@@ -532,14 +536,16 @@ func TestResumeTool_TheBudgetOfTheStepIsChecked(t *testing.T) {
 		t.Fatal("the workflow has no commit step")
 	}
 	r.setJudgmentStep("commit")
-	r.recordStep("main", commit, wfe.Outcome{
-		Status:  wfe.OutcomeFailed,
-		Summary: "the commit failed",
-		Data:    map[string]string{"error": "the commit failed"},
+	r.recordStep("main", commit, outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the commit failed",
+		Data:       map[string]string{"error": "the commit failed"},
 	})
-	r.record(wfe.ActionKindRun, "/gtw commit", "commit", wfe.Outcome{
-		Status:  wfe.OutcomeFailed,
-		Summary: "the commit failed",
+	r.record(wfe.ActionKindRun, "/gtw commit", "commit", outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the commit failed",
 	})
 
 	_, err := svc.toolResume(context.Background(), r, pendingCall{})
@@ -573,18 +579,19 @@ jobs:
 	}
 	r.setJudgment(`the previous step "commit" ended as "failed"`)
 	r.setJudgmentStep("commit")
-	r.recordStep("main", commit, wfe.Outcome{
-		Status:  wfe.OutcomeFailed,
-		Summary: "the commit failed",
-		Data:    map[string]string{"error": "the commit failed", "reason": "conflict"},
+	r.recordStep("main", commit, outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the commit failed",
+		Data:       map[string]string{"error": "the commit failed", "reason": "conflict"},
 	})
 
 	res, err := svc.toolNext(context.Background(), r, pendingCall{})
 	if err != nil {
 		t.Fatalf("next: %v", err)
 	}
-	if res.Status != string(wfe.OutcomeNoop) {
-		t.Errorf("the verdict is %q, want the one of the skipped step", res.Status)
+	if res.Status != http.StatusOK {
+		t.Errorf("the verdict is %d, want the one of the skipped step", res.Status)
 	}
 
 	st, ok := r.stepState("commit")
@@ -592,17 +599,11 @@ jobs:
 		t.Fatal("the commit step has no state")
 	}
 	out := st.Outcome
-	if out.Status != wfe.OutcomeNoop {
-		t.Errorf("the step ended as %q, want the skipped one", out.Status)
+	if out.Status != http.StatusOK {
+		t.Errorf("the step ended as %d, want the skipped one", out.Status)
 	}
-	if out.Summary != agentSkippedSummary {
-		t.Errorf("the summary is %q, want %q", out.Summary, agentSkippedSummary)
-	}
-	if out.Data["reason"] != "conflict" {
-		t.Errorf("the facts are %v, want the ones the step produced", out.Data)
-	}
-	if _, ok := out.Data[wfe.OutcomeKeyError]; ok {
-		t.Errorf("the error is still on the step: %v", out.Data)
+	if out.StatusText != agentSkippedSummary {
+		t.Errorf("the summary is %q, want %q", out.StatusText, agentSkippedSummary)
 	}
 	if st.Skipped {
 		t.Error("the step is marked as never run: it did run")
@@ -682,7 +683,7 @@ func TestNextTool_AStepThatSucceededIsRefused(t *testing.T) {
 		t.Fatal("the workflow has no commit step")
 	}
 	r.setJudgmentStep("commit")
-	r.recordStep("main", commit, wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"})
+	r.recordStep("main", commit, outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "committed"})
 
 	_, err := svc.toolNext(context.Background(), r, pendingCall{})
 	if err == nil || !isToolError(err) {
@@ -706,7 +707,7 @@ func TestResumeTool_AStepThatSucceededIsRefused(t *testing.T) {
 		t.Fatal("the workflow has no commit step")
 	}
 	r.setJudgmentStep("commit")
-	r.recordStep("main", commit, wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"})
+	r.recordStep("main", commit, outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "committed"})
 
 	_, err := svc.toolResume(context.Background(), r, pendingCall{})
 	if err == nil || !isToolError(err) {
@@ -740,10 +741,11 @@ jobs:
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{
-			Status:  messages.OutcomeFailed,
-			Summary: "the commit failed",
-			Data:    map[string]string{"error": "the commit failed"},
+		{outcome: outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "the commit failed",
+			Data:       map[string]string{"error": "the commit failed"},
 		}},
 		okStep("pushed"),
 	}
@@ -783,15 +785,17 @@ func TestNextTool_TheHistoryAgreesWithTheRunState(t *testing.T) {
 	}
 	r.setJudgment(`the previous step "commit" ended as "failed"`)
 	r.setJudgmentStep("commit")
-	r.recordStep("main", commit, wfe.Outcome{
-		Status:  wfe.OutcomeFailed,
-		Summary: "the commit failed",
-		Data:    map[string]string{"error": "the commit failed"},
+	r.recordStep("main", commit, outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the commit failed",
+		Data:       map[string]string{"error": "the commit failed"},
 	})
-	r.record(wfe.ActionKindRun, "/gtw commit", "commit", wfe.Outcome{
-		Status:  wfe.OutcomeFailed,
-		Summary: "the commit failed",
-		Data:    map[string]string{"error": "the commit failed"},
+	r.record(wfe.ActionKindRun, "/gtw commit", "commit", outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the commit failed",
+		Data:       map[string]string{"error": "the commit failed"},
 	})
 
 	if _, err := svc.toolNext(context.Background(), r, pendingCall{}); err != nil {
@@ -1282,14 +1286,14 @@ jobs:
 	if !ok {
 		t.Fatal("the workflow has no fix step")
 	}
-	r.recordStep("main", fix, wfe.Outcome{Status: wfe.OutcomeFailed, Summary: "nothing to fix"})
+	r.recordStep("main", fix, outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "nothing to fix"})
 
 	skipped, ok := r.stepByID("skipped")
 	if !ok {
 		t.Fatal("the workflow has no skipped step")
 	}
 	r.mu.Lock()
-	wfe.RecordStep(r.state, "other", skipped, wfe.Outcome{Status: wfe.OutcomeNoop}, true)
+	wfe.RecordStep(r.state, "other", skipped, outcome.Outcome{Status: http.StatusOK}, true)
 	r.mu.Unlock()
 
 	job, _ := r.brainIteration()

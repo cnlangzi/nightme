@@ -6,6 +6,7 @@ package gtw
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -137,8 +138,8 @@ func TestFixRemote_HeldIssue_Rejected(t *testing.T) {
 	if got == nil {
 		t.Fatal("the message did not settle")
 	}
-	if got.Data["reason"] != "issue_in_state" {
-		t.Errorf("outcome reason = %q, want issue_in_state", got.Data["reason"])
+	if got.Status != http.StatusConflict {
+		t.Errorf("outcome status = %d, want %d", got.Status, http.StatusConflict)
 	}
 	if got.Data["label"] != LabelReady {
 		t.Errorf("outcome label = %q, want %q", got.Data["label"], LabelReady)
@@ -192,8 +193,8 @@ func TestFixRemote_ClaimedIssue_KeepsItsRefusal(t *testing.T) {
 	if got == nil {
 		t.Fatal("the message did not settle")
 	}
-	if got.Data["reason"] != "issue_claimed" {
-		t.Errorf("outcome reason = %q, want issue_claimed", got.Data["reason"])
+	if got.Status != http.StatusConflict {
+		t.Errorf("outcome status = %d, want %d", got.Status, http.StatusConflict)
 	}
 	if got.Data["label"] != LabelWIP {
 		t.Errorf("outcome label = %q, want %q", got.Data["label"], LabelWIP)
@@ -228,8 +229,8 @@ func TestFixRemote_ClaimWinsOverAnotherState(t *testing.T) {
 	if got == nil {
 		t.Fatal("the message did not settle")
 	}
-	if got.Data["reason"] != "issue_claimed" {
-		t.Errorf("outcome reason = %q, want issue_claimed", got.Data["reason"])
+	if got.Status != http.StatusConflict {
+		t.Errorf("outcome status = %d, want %d", got.Status, http.StatusConflict)
 	}
 }
 

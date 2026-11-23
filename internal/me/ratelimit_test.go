@@ -2,12 +2,14 @@ package me
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -19,9 +21,10 @@ func TestARateLimitedAgentPausesTheRun(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "429 Too Many Requests",
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "429 Too Many Requests",
 	}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -54,6 +57,32 @@ func TestARateLimitedAgentPausesTheRun(t *testing.T) {
 	}
 }
 
+// TestAThrottledStatusPausesTheRunWithoutTheText — the status says
+// it all: the outcome carries 429 and not one of its words says so.
+func TestAThrottledStatusPausesTheRunWithoutTheText(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusTooManyRequests,
+		StatusText: "the upstream refused the request",
+	}}}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForStatus(t, svc, "obs-1", PhasePaused)
+
+	st := svc.Snapshot("obs-1")
+	if !strings.Contains(st.PauseReason, "429") {
+		t.Errorf("the pause reason is %q, want it to name the rate limit", st.PauseReason)
+	}
+}
+
 // TestARateLimitedAgentInTheTranscriptPausesTheRun — the 429 may
 // reach the run in the transcript rather than in the summary.
 func TestARateLimitedAgentInTheTranscriptPausesTheRun(t *testing.T) {
@@ -61,9 +90,10 @@ func TestARateLimitedAgentInTheTranscriptPausesTheRun(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "the command failed",
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the command failed",
 	}, transcript: []observe.Entry{
 		{Kind: messages.OutResult, Text: "API error: 429 rate_limit_error"},
 	}}}
@@ -83,9 +113,10 @@ func TestARateLimitWordWithoutTheCodeIsEnough(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "the command failed",
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the command failed",
 	}, transcript: []observe.Entry{
 		{Kind: messages.OutResult, Text: `{"type":"error","error":{"type":"rate_limit_error"}}`},
 	}}}
@@ -124,9 +155,10 @@ func TestARateLimitInTheMiddleOfALongTurnIsFound(t *testing.T) {
 	}
 
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "the command failed",
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the command failed",
 	}, transcript: entries}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -149,13 +181,15 @@ func TestAThrottledCommandTheChatModelIssuedPausesTheRun(t *testing.T) {
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{
-			Status:  messages.OutcomeFailed,
-			Summary: "the commit failed",
+		{outcome: outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "the commit failed",
 		}},
-		{outcome: messages.Outcome{
-			Status:  messages.OutcomeFailed,
-			Summary: "429 Too Many Requests",
+		{outcome: outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "429 Too Many Requests",
 		}},
 	}
 
@@ -192,13 +226,15 @@ jobs:
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{
-			Status:  messages.OutcomeFailed,
-			Summary: "the commit failed",
+		{outcome: outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "the commit failed",
 		}},
-		{outcome: messages.Outcome{
-			Status:  messages.OutcomeFailed,
-			Summary: "429 Too Many Requests",
+		{outcome: outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "429 Too Many Requests",
 		}},
 	}
 
@@ -222,9 +258,10 @@ func TestACommandThatWorkedIsNotThrottled(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: "ok",
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "ok",
 	}, transcript: []observe.Entry{
 		{Kind: messages.OutResult, Text: "handled 429 responses before"},
 	}}}
@@ -264,9 +301,10 @@ func TestTheDecisionStateExplainsARateLimit(t *testing.T) {
 
 	svc, _ := testService(t, dir, noModels())
 	r := testRun(t, svc, "one")
-	r.record(wfe.ActionKindRun, "/gtw commit", "commit", wfe.Outcome{
-		Status:  wfe.OutcomeFailed,
-		Summary: "429 Too Many Requests",
+	r.record(wfe.ActionKindRun, "/gtw commit", "commit", outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "429 Too Many Requests",
 	})
 
 	state := svc.decisionState(r)

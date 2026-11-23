@@ -14,7 +14,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/cnlangzi/nightme/internal/messages"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +27,8 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // fixRemoteRig bundles everything an ID-mode /gtw fix test
@@ -137,7 +138,7 @@ func (r *fixRemoteRecCh) serialized() []string {
 
 // settled returns the outcome of the settled message, or nil when
 // the message has not settled yet.
-func (r *fixRemoteRecCh) settled() *messages.Outcome {
+func (r *fixRemoteRecCh) settled() *outcome.Outcome {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, m := range r.sends {
@@ -216,13 +217,10 @@ func TestFixRemote_SettlesAfterTheDispatchedTurn(t *testing.T) {
 	if got == nil {
 		t.Fatal("the message did not settle when the dispatched turn ended")
 	}
-	if got.Status != messages.OutcomeFailed {
-		t.Errorf("settled status = %q, want failed — the agent produced nothing", got.Status)
+	if got.Status != http.StatusInternalServerError {
+		t.Errorf("outcome status = %d, want %d", got.Status, http.StatusInternalServerError)
 	}
-	if got.Data["reason"] != "no_changes" {
-		t.Errorf("settled reason = %q, want no_changes", got.Data["reason"])
-	}
-	if got.Data["error"] == "" {
+	if got.StatusText == "" {
 		t.Error("the exception must say what broke")
 	}
 }
@@ -260,14 +258,14 @@ func TestFixRemote_SettlesWithTheWorkTheAgentProduced(t *testing.T) {
 	if got == nil {
 		t.Fatal("the message did not settle when the dispatched turn ended")
 	}
-	if got.Status != messages.OutcomeOK {
-		t.Errorf("settled status = %q, want ok — the agent produced a file (outcome %+v)", got.Status, got)
+	if got.Status != http.StatusOK {
+		t.Errorf("settled status = %d, want ok — the agent produced a file (outcome %+v)", got.Status, got)
 	}
 	if got.Data["changes"] != "1" {
 		t.Errorf("settled changes = %q, want 1", got.Data["changes"])
 	}
-	if _, ok := got.Data["error"]; ok {
-		t.Errorf("a normal result carries no error description: %v", got.Data)
+	if got.Exception() {
+		t.Errorf("a normal result is not an exception: %v", got)
 	}
 }
 
@@ -300,8 +298,8 @@ func TestFixRemote_StoppedTurnKeepsTheFacts(t *testing.T) {
 	if got == nil {
 		t.Fatal("the message did not settle when the dispatched turn ended")
 	}
-	if got.Status != messages.OutcomeCancelled {
-		t.Errorf("settled status = %q, want cancelled", got.Status)
+	if got.Status != outcome.StatusClientClosedRequest {
+		t.Errorf("settled status = %d, want cancelled", got.Status)
 	}
 	if got.Data["branch"] == "" || got.Data["worktree"] == "" {
 		t.Errorf("settled data = %v, want the facts the fix produced", got.Data)
@@ -680,8 +678,8 @@ func TestFixRemote_AlreadyClaimed_Rejected(t *testing.T) {
 	if settled == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if settled.Data["reason"] != "issue_claimed" {
-		t.Errorf("outcome reason = %q, want issue_claimed", settled.Data["reason"])
+	if settled.Status != http.StatusConflict {
+		t.Errorf("outcome status = %d, want %d", settled.Status, http.StatusConflict)
 	}
 
 	// No label write of any kind on the issue.
@@ -1114,7 +1112,7 @@ func TestFixRemote_WithAttachments_EndToEnd(t *testing.T) {
 }
 
 // waitSettled waits for the settled message the recorder captured.
-func waitSettled(r *fixRemoteRecCh) *messages.Outcome {
+func waitSettled(r *fixRemoteRecCh) *outcome.Outcome {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if got := r.settled(); got != nil {

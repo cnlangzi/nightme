@@ -74,6 +74,12 @@ type streamState struct {
 	// The answer is not published as an event: the probe does not
 	// wait for the event pipeline to deliver anything.
 	onControlResponse func(streamEvent)
+
+	// apiErr is the upstream failure the current turn reported.
+	// The CLI puts the HTTP status on the assistant frame of the
+	// turn that hit the failure; the result frame that closes the
+	// turn may carry no status of its own.
+	apiErr *agent.APIError
 }
 
 // streamOption customizes the per-session state pumpStream builds.
@@ -108,6 +114,7 @@ func resetTasksForNewTurn(state *streamState) {
 	}
 	state.tasks = make(map[string]agent.AgentTaskItem)
 	state.taskOrder = nil
+	state.apiErr = nil
 }
 
 // streamEvent is the on-the-wire JSON shape emitted by Claude Code in
@@ -169,6 +176,115 @@ type streamEvent struct {
 	// bridge sent. The request_id inside it names the probe the
 	// answer belongs to.
 	Response *controlResponse `json:"response,omitempty"`
+
+	// apiErrorFields is the upstream failure the frame reports. The
+	// result frame carries the status; the assistant frame of the
+	// same turn may have carried it earlier.
+	apiErrorFields
+}
+
+// apiErrorFields is the upstream failure a frame reports.
+//
+// Claude Code reports an API failure with its HTTP status. The
+// stream-json wire spells the fields in snake_case and the transcript
+// the CLI writes to disk spells them in camelCase, so both spellings
+// are read.
+type apiErrorFields struct {
+	APIErrorStatusSnake *int   `json:"api_error_status,omitempty"`
+	APIErrorStatusCamel *int   `json:"apiErrorStatus,omitempty"`
+	IsAPIMessageSnake   *bool  `json:"is_api_error_message,omitempty"`
+	IsAPIMessageCamel   *bool  `json:"isApiErrorMessage,omitempty"`
+	APIErrorSnake       string `json:"api_error,omitempty"`
+	APIErrorCamel       string `json:"apiError,omitempty"`
+	ErrorDetailsSnake   string `json:"error_details,omitempty"`
+	ErrorDetailsCamel   string `json:"errorDetails,omitempty"`
+}
+
+// status returns the HTTP status the frame reported, or zero when it
+// reported none.
+func (f apiErrorFields) status() int {
+	if f.APIErrorStatusSnake != nil {
+		return *f.APIErrorStatusSnake
+	}
+	if f.APIErrorStatusCamel != nil {
+		return *f.APIErrorStatusCamel
+	}
+	return 0
+}
+
+// isAPIMessage reports whether the frame says it carries an API
+// error.
+func (f apiErrorFields) isAPIMessage() bool {
+	if f.IsAPIMessageSnake != nil {
+		return *f.IsAPIMessageSnake
+	}
+	if f.IsAPIMessageCamel != nil {
+		return *f.IsAPIMessageCamel
+	}
+	return false
+}
+
+// code returns the CLI's own code for the failure.
+func (f apiErrorFields) code() string {
+	if f.APIErrorSnake != "" {
+		return f.APIErrorSnake
+	}
+	return f.APIErrorCamel
+}
+
+// details returns the upstream's own words about the failure.
+func (f apiErrorFields) details() string {
+	if f.ErrorDetailsSnake != "" {
+		return f.ErrorDetailsSnake
+	}
+	return f.ErrorDetailsCamel
+}
+
+// apiError renders the failure the fields report, or nil when they
+// report none.
+func (f apiErrorFields) apiError() *agent.APIError {
+	if f.status() == 0 && !f.isAPIMessage() {
+		return nil
+	}
+	return &agent.APIError{
+		Status:  f.status(),
+		Code:    f.code(),
+		Message: f.details(),
+	}
+}
+
+// apiErrorOf builds the error an error result frame reports.
+//
+// The frame carries the upstream's own status when the CLI knew it;
+// the assistant frame of the same turn may have carried it earlier,
+// so the remembered one is the fallback. The CLI's own words are the
+// message when it sent no details of its own, and its own code — the
+// result's subtype — is the code when it named no other.
+func apiErrorOf(ev streamEvent, state *streamState) error {
+	status := ev.apiErrorFields.status()
+	code := ev.apiErrorFields.code()
+	details := ev.apiErrorFields.details()
+	if state != nil && state.apiErr != nil {
+		if status == 0 {
+			status = state.apiErr.Status
+		}
+		if code == "" {
+			code = state.apiErr.Code
+		}
+		if details == "" {
+			details = state.apiErr.Message
+		}
+	}
+	if code == "" {
+		code = ev.Subtype
+	}
+	if details == "" {
+		details = ev.Result
+	}
+	if status == 0 && code == "" && details == "" {
+		return fmt.Errorf("claudecode: the turn failed")
+	}
+	return &agent.APIError{Status: status, Code: code, Message: details}
 }
 
 // controlResponse is the payload of a control_response frame.
@@ -188,6 +304,11 @@ type assistantMsg struct {
 	Role    string         `json:"role,omitempty"`
 	Model   string         `json:"model,omitempty"`
 	Content []contentBlock `json:"content,omitempty"`
+
+	// apiErrorFields is the upstream failure the assistant message
+	// carries. The CLI reports an API failure on the assistant frame
+	// of the turn that hit it.
+	apiErrorFields
 }
 
 // resultOrigin is the origin tag of a result frame. The CLI opens a
@@ -428,6 +549,15 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 	case "assistant":
 		if ev.Message == nil {
 			return
+		}
+		// The CLI reports an upstream failure on the assistant frame
+		// of the turn that hit it. The status is kept for the result
+		// frame that closes the turn.
+		if apiErr := ev.Message.apiErrorFields.apiError(); apiErr != nil {
+			state.apiErr = apiErr
+		}
+		if apiErr := ev.apiErrorFields.apiError(); apiErr != nil {
+			state.apiErr = apiErr
 		}
 		for _, block := range ev.Message.Content {
 			switch block.Type {
@@ -680,8 +810,12 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 			// follow the same contract — without this the feishu
 			// adapter's `if msg.Err != nil` branch never fires on
 			// claudecode error results.
+			//
+			// The error carries the upstream's HTTP status when the
+			// CLI reported one: the layers above branch on the
+			// number instead of on the words.
 			if ev.IsError {
-				evResult.Err = fmt.Errorf("claudecode: %s: %s", ev.Subtype, ev.Result)
+				evResult.Err = apiErrorOf(ev, state)
 			}
 			events <- evResult
 		}

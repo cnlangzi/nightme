@@ -7,11 +7,13 @@ package gtw
 // render back from the recording emitter.
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // renders returns the captured messages that are draft renders
@@ -48,7 +50,7 @@ func waitRender(t *testing.T, r *recordingCh, msgID string) messages.OutboundMes
 
 // settledMsg returns the settled outcome of the message, or nil
 // while it has not settled.
-func settledMsg(r *recordingCh, msgID string) *messages.Outcome {
+func settledMsg(r *recordingCh, msgID string) *outcome.Outcome {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, m := range r.sends {
@@ -59,7 +61,7 @@ func settledMsg(r *recordingCh, msgID string) *messages.Outcome {
 	return nil
 }
 
-func waitSettledMsg(t *testing.T, r *recordingCh, msgID string) *messages.Outcome {
+func waitSettledMsg(t *testing.T, r *recordingCh, msgID string) *outcome.Outcome {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -98,8 +100,8 @@ func TestFactory_New_RendersDraftsWhenTheTurnEnds(t *testing.T) {
 	if out.Text != want {
 		t.Errorf("render body =\n%q\nwant\n%q", out.Text, want)
 	}
-	if got := waitSettledMsg(t, rig.ch, "msg-1"); got.Status != messages.OutcomeOK {
-		t.Errorf("settled status = %q, want ok — a clean turn settles normally", got.Status)
+	if got := waitSettledMsg(t, rig.ch, "msg-1"); got.Status != http.StatusOK {
+		t.Errorf("settled status = %d, want ok — a clean turn settles normally", got.Status)
 	}
 }
 

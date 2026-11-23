@@ -187,6 +187,14 @@ func (as *AgentSession) readpumpLoop(stop <-chan struct{}, done chan struct{}) {
 				return
 			}
 
+			// The failure the turn reported rides on the prompt: the
+			// layer that settles the message needs to know what the
+			// upstream said — a 429 from the API is a fact, not a
+			// line of prose.
+			if ev.Kind == agent.EventAgentResult && ev.Err != nil {
+				as.rememberPromptErr(ev.Err)
+			}
+
 			// Terminal handling: EventAgentDone / EventAgentError ends the
 			// in-flight Prompt. The PromptEnded event is emitted
 			// by endPrompt itself.
@@ -250,6 +258,19 @@ func (as *AgentSession) emitLifecycleLocked(status Status) {
 // currentPrompt is installed. /review injects via WithReplyTo
 // and the completion has to reach the channel either way. The
 // reply-to override is the anchor in that case.
+// rememberPromptErr keeps the failure the turn reported.
+//
+// The error belongs to the prompt that is running: the readpump
+// reads it back when the prompt ends.
+func (as *AgentSession) rememberPromptErr(err error) {
+	if as == nil || err == nil {
+		return
+	}
+	as.asMu.Lock()
+	as.promptErr = err
+	as.asMu.Unlock()
+}
+
 func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 	as.asMu.Lock()
 	now := time.Now()
@@ -258,6 +279,7 @@ func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 	if p != nil {
 		p.EndedAt = now
 		p.EndReason = reason
+		p.Err = as.promptErr
 		if userMsgID == "" {
 			userMsgID = p.LastMessageID
 		} else {
@@ -271,6 +293,7 @@ func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 			LastMessageID:  userMsgID,
 			EndedAt:        now,
 			EndReason:      reason,
+			Err:            as.promptErr,
 		}
 	}
 	slog.Info("agentsession: endPrompt", "as_id", as.ID, "prompt_id", p.ID, "user_msg_id", userMsgID, "reason", reason.String())
@@ -284,6 +307,7 @@ func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 	// on the prompt-done path; either suffices on its own but
 	// having both keeps the invariant local to either call site).
 	as.currentPromptOverrideUserMsgID = ""
+	as.promptErr = nil
 	as.isReady.Store(true)
 	stop := as.readpumpStop
 	as.asMu.Unlock()

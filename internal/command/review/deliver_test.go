@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -426,8 +427,8 @@ func TestHandle_FailedInjectionReportsNotDelivered(t *testing.T) {
 	if got.Data["delivered"] != "false" {
 		t.Errorf("the outcome says delivered=%q, want false", got.Data["delivered"])
 	}
-	if got.Data["reason"] != "inject_failed" {
-		t.Errorf("the outcome reason = %q, want inject_failed", got.Data["reason"])
+	if got.Status != http.StatusInternalServerError {
+		t.Errorf("outcome status = %d, want %d", got.Status, http.StatusInternalServerError)
 	}
 
 	// The findings stay in the record: the next review command hands

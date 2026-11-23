@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // funcCLIRunner delegates Run to fn so a test can inspect the
@@ -610,8 +610,8 @@ func TestCreateIssuesFromDrafts_RelationFailureWarns(t *testing.T) {
 	if !strings.HasPrefix(got, want) {
 		t.Errorf("reply =\n%s\nwant it to begin with %q", got, want)
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %q, want %q", outcome.Status, messages.OutcomeOK)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusOK)
 	}
 	if outcome.Data["deps"] != "0" || outcome.Data["deps_failed"] != "1" {
 		t.Errorf("outcome data = %v, want deps=0 deps_failed=1", outcome.Data)
@@ -651,8 +651,8 @@ func TestCreateIssuesFromDrafts_RelationFailureContinues(t *testing.T) {
 	if want := "→ deps: #44 blocked by #43"; !strings.Contains(got, want) {
 		t.Errorf("reply missing %q:\n%s", want, got)
 	}
-	if outcome.Status != messages.OutcomeOK {
-		t.Errorf("outcome status = %q, want %q", outcome.Status, messages.OutcomeOK)
+	if outcome.Status != http.StatusOK {
+		t.Errorf("outcome status = %d, want %d", outcome.Status, http.StatusOK)
 	}
 	if outcome.Data["deps"] != "1" || outcome.Data["deps_failed"] != "1" {
 		t.Errorf("outcome data = %v, want deps=1 deps_failed=1", outcome.Data)

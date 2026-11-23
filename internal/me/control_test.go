@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -136,8 +138,8 @@ func TestResume_RunsTheStepAgain(t *testing.T) {
 	if !ok {
 		t.Fatal("the commit step has no state")
 	}
-	if out.Summary != "the commit failed again" {
-		t.Errorf("the step ended as %q, want the verdict of the retry", out.Summary)
+	if out.StatusText != "the commit failed again" {
+		t.Errorf("the step ended as %q, want the verdict of the retry", out.StatusText)
 	}
 }
 
@@ -220,10 +222,11 @@ func TestNext_SkipsTheStep(t *testing.T) {
 
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}, MaxJudgments: 1})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{
-			Status:  messages.OutcomeFailed,
-			Summary: "the commit failed",
-			Data:    map[string]string{"error": "the commit failed", "reason": "conflict"},
+		{outcome: outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "the commit failed",
+			Data:       map[string]string{"error": "the commit failed", "reason": "conflict"},
 		}},
 		okStep("pushed"),
 	}
@@ -258,17 +261,11 @@ func TestNext_SkipsTheStep(t *testing.T) {
 		t.Fatal("the commit step has no state")
 	}
 	out := st.Outcome
-	if out.Status != wfe.OutcomeNoop {
-		t.Errorf("the step ended as %q, want the skipped one", out.Status)
+	if out.Status != http.StatusOK {
+		t.Errorf("the step ended as %d, want the skipped one", out.Status)
 	}
-	if out.Summary != operatorSkippedSummary {
-		t.Errorf("the summary is %q, want %q", out.Summary, operatorSkippedSummary)
-	}
-	if out.Data["reason"] != "conflict" {
-		t.Errorf("the facts are %v, want the ones the step produced", out.Data)
-	}
-	if _, ok := out.Data[wfe.OutcomeKeyError]; ok {
-		t.Errorf("the error is still on the step: %v", out.Data)
+	if out.StatusText != operatorSkippedSummary {
+		t.Errorf("the summary is %q, want %q", out.StatusText, operatorSkippedSummary)
 	}
 	if st.Skipped {
 		t.Error("the step is marked as never run: it did run")
@@ -280,7 +277,7 @@ func TestNext_SkipsTheStep(t *testing.T) {
 		if rec.Kind != wfe.ActionKindRun || rec.StepID != "commit" {
 			continue
 		}
-		if rec.Outcome.Status == wfe.OutcomeNoop && rec.Outcome.Summary == operatorSkippedSummary {
+		if rec.Outcome.Status == http.StatusOK && rec.Outcome.StatusText == operatorSkippedSummary {
 			skipped = true
 		}
 	}
@@ -325,12 +322,12 @@ func TestNext_SkipsTheStepTheJudgmentIsAbout(t *testing.T) {
 	if !ok {
 		t.Fatal("the commit step has no state")
 	}
-	if st.Outcome.Status != wfe.OutcomeNoop {
-		t.Errorf("the commit step ended as %q, want the skipped one", st.Outcome.Status)
+	if st.Outcome.Status != http.StatusOK {
+		t.Errorf("the commit step ended as %d, want the skipped one", st.Outcome.Status)
 	}
 	pushed := waitForStep(t, r, "push")
-	if pushed.Outcome.Status == wfe.OutcomeNoop {
-		t.Error("the push step was skipped although it ran")
+	if isSkippedOutcome(pushed.Outcome) {
+		t.Error("the push step was skipped although the commit step was")
 	}
 }
 
@@ -348,7 +345,7 @@ func TestNextOnAStepThatSucceededChangesNothing(t *testing.T) {
 		t.Fatal("the workflow has no commit step")
 	}
 	r.setJudgmentStep("commit")
-	r.recordStep("main", commit, wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"})
+	r.recordStep("main", commit, outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "committed"})
 
 	if err := svc.applyNext(context.Background(), r, "commit"); err != nil {
 		t.Fatalf("next: %v", err)
@@ -357,11 +354,11 @@ func TestNextOnAStepThatSucceededChangesNothing(t *testing.T) {
 	if !ok {
 		t.Fatal("the commit step has no state")
 	}
-	if st.Outcome.Status != wfe.OutcomeOK {
-		t.Errorf("the step ended as %q, want the one it had", st.Outcome.Status)
+	if st.Outcome.Status != http.StatusOK {
+		t.Errorf("the step ended as %d, want the one it had", st.Outcome.Status)
 	}
-	if st.Outcome.Summary != "committed" {
-		t.Errorf("the summary is %q, want the one the step had", st.Outcome.Summary)
+	if st.Outcome.StatusText != "committed" {
+		t.Errorf("the summary is %q, want the one the step had", st.Outcome.StatusText)
 	}
 }
 
@@ -429,10 +426,11 @@ func TestTheTargetStep_IsTheStepTheRunWorkedOn(t *testing.T) {
 	if !ok {
 		t.Fatal("the workflow has no commit step")
 	}
-	r.recordStep("main", commit, wfe.Outcome{Status: wfe.OutcomeFailed, Summary: "the commit failed"})
-	r.record(wfe.ActionKindRun, "/gtw commit", "commit", wfe.Outcome{
-		Status:  wfe.OutcomeFailed,
-		Summary: "the commit failed",
+	r.recordStep("main", commit, outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "the commit failed"})
+	r.record(wfe.ActionKindRun, "/gtw commit", "commit", outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the commit failed",
 	})
 
 	step, ok := r.targetStep()
@@ -456,7 +454,7 @@ func TestTheTargetStep_IsTheStepTheRunWorkedOn(t *testing.T) {
 
 	// A step that succeeded is not the step to act on: the run is on
 	// the next step of the plan.
-	r.recordStep("main", commit, wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"})
+	r.recordStep("main", commit, outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "committed"})
 	step, ok = r.targetStep()
 	if !ok {
 		t.Fatal("the run is on no step")
@@ -557,10 +555,10 @@ func TestTheRoundCardShowsTheErrorOfABrokenStep(t *testing.T) {
 	if !ok {
 		t.Fatal("the workflow has no commit step")
 	}
-	r.recordStep("main", commit, wfe.Outcome{
-		Status:  wfe.OutcomeNoop,
-		Summary: "nothing to do",
-		Data:    map[string]string{"error": "the worktree is gone"},
+	r.recordStep("main", commit, outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the worktree is gone",
 	})
 
 	items := r.roundTasks("main", 1)
@@ -790,11 +788,11 @@ func TestNext_SkipsAStepThatIsStillRunning(t *testing.T) {
 	if !ok {
 		t.Fatal("the commit step has no state")
 	}
-	if st.Outcome.Status != wfe.OutcomeNoop {
-		t.Errorf("the step ended as %q, want the skipped one", st.Outcome.Status)
+	if st.Outcome.Status != http.StatusOK {
+		t.Errorf("the step ended as %d, want the skipped one", st.Outcome.Status)
 	}
-	if st.Outcome.Summary != operatorSkippedSummary {
-		t.Errorf("the summary is %q, want %q", st.Outcome.Summary, operatorSkippedSummary)
+	if st.Outcome.StatusText != operatorSkippedSummary {
+		t.Errorf("the summary is %q, want %q", st.Outcome.StatusText, operatorSkippedSummary)
 	}
 
 	// The run holds no decision for the turn: the step is skipped
@@ -857,23 +855,24 @@ func TestTheVerdictOfASkippedStepDoesNotOverwriteTheSkip(t *testing.T) {
 	if !ok {
 		t.Fatal("the workflow has no commit step")
 	}
-	r.recordStep("main", commit, wfe.Outcome{
-		Status:  wfe.OutcomeNoop,
-		Summary: operatorSkippedSummary,
+	r.recordStep("main", commit, outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: operatorSkippedSummary,
 	})
 
 	// The verdict of the command that was abandoned arrives late.
-	r.recordStep("main", commit, wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"})
+	r.recordStep("main", commit, outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "committed"})
 
 	st, ok := r.stepState("commit")
 	if !ok {
 		t.Fatal("the commit step has no state")
 	}
-	if st.Outcome.Status != wfe.OutcomeNoop {
-		t.Errorf("the step ended as %q, want the skipped one", st.Outcome.Status)
+	if st.Outcome.Status != http.StatusOK {
+		t.Errorf("the step ended as %d, want the skipped one", st.Outcome.Status)
 	}
-	if st.Outcome.Summary != operatorSkippedSummary {
-		t.Errorf("the summary is %q, want %q", st.Outcome.Summary, operatorSkippedSummary)
+	if st.Outcome.StatusText != operatorSkippedSummary {
+		t.Errorf("the summary is %q, want %q", st.Outcome.StatusText, operatorSkippedSummary)
 	}
 }
 
@@ -914,11 +913,11 @@ func TestTheOutcomeOfAnAbandonedCommandDoesNotOverwriteTheSkip(t *testing.T) {
 	if !ok {
 		t.Fatal("the commit step has no state")
 	}
-	if st.Outcome.Status != wfe.OutcomeNoop {
-		t.Errorf("the step ended as %q, want the skipped one", st.Outcome.Status)
+	if st.Outcome.Status != http.StatusOK {
+		t.Errorf("the step ended as %d, want the skipped one", st.Outcome.Status)
 	}
-	if st.Outcome.Summary != operatorSkippedSummary {
-		t.Errorf("the summary is %q, want %q", st.Outcome.Summary, operatorSkippedSummary)
+	if st.Outcome.StatusText != operatorSkippedSummary {
+		t.Errorf("the summary is %q, want %q", st.Outcome.StatusText, operatorSkippedSummary)
 	}
 }
 
@@ -957,8 +956,8 @@ func TestTheAbandonedCommandEndsTheWait(t *testing.T) {
 		if got.err != nil {
 			t.Fatalf("watch: %v", got.err)
 		}
-		if got.res.Status != statusAbandoned {
-			t.Errorf("the wait ended as %q, want the abandoned one", got.res.Status)
+		if got.res.phase != phaseAbandoned {
+			t.Errorf("the wait ended in the phase %v, want the abandoned one", got.res.phase)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the wait did not end")
@@ -978,7 +977,7 @@ func TestTheCommandsDecideOnTheStateOfTheTargetStep(t *testing.T) {
 		name string
 		// outcome is the verdict of the step, and ran says whether it
 		// ran at all.
-		outcome wfe.Outcome
+		outcome outcome.Outcome
 		ran     bool
 		// wantResume and wantNext say whether the command acts on the
 		// step.
@@ -991,7 +990,7 @@ func TestTheCommandsDecideOnTheStateOfTheTargetStep(t *testing.T) {
 	}{
 		{
 			name:       "the step succeeded",
-			outcome:    wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"},
+			outcome:    outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "committed"},
 			ran:        true,
 			wantResume: false,
 			wantNext:   false,
@@ -1000,21 +999,21 @@ func TestTheCommandsDecideOnTheStateOfTheTargetStep(t *testing.T) {
 		},
 		{
 			name:       "the step failed",
-			outcome:    wfe.Outcome{Status: wfe.OutcomeFailed, Summary: "the commit failed"},
+			outcome:    outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "the commit failed"},
 			ran:        true,
 			wantResume: true,
 			wantNext:   true,
 		},
 		{
 			name:       "the step was cancelled",
-			outcome:    wfe.Outcome{Status: wfe.OutcomeCancelled, Summary: "the commit was cancelled"},
+			outcome:    outcome.Outcome{Success: false, Status: outcome.StatusClientClosedRequest, StatusText: "the commit was cancelled"},
 			ran:        true,
 			wantResume: true,
 			wantNext:   true,
 		},
 		{
 			name:       "the step has not run",
-			outcome:    wfe.Outcome{},
+			outcome:    outcome.Outcome{},
 			ran:        false,
 			wantResume: false,
 			wantNext:   true,
@@ -1085,7 +1084,7 @@ func TestResume_OnAStepThatCannotRunAgainDecidesNothing(t *testing.T) {
 	writeWorkflow(t, dir, "two", commitPushWorkflow)
 
 	svc, _ := testService(t, dir, Config{})
-	r := pausedRun(t, svc, "commit", wfe.Outcome{Status: wfe.OutcomeFailed, Summary: "the commit failed"}, true)
+	r := pausedRun(t, svc, "commit", outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "the commit failed"}, true)
 
 	// The job went on to its next round: the step cannot run again.
 	r.mu.Lock()
@@ -1120,7 +1119,7 @@ func TestNext_OnAStepThatWasSkippedDecidesNothing(t *testing.T) {
 	writeWorkflow(t, dir, "two", commitPushWorkflow)
 
 	svc, _ := testService(t, dir, Config{})
-	pausedRun(t, svc, "commit", wfe.Outcome{Status: wfe.OutcomeNoop, Summary: operatorSkippedSummary}, true)
+	pausedRun(t, svc, "commit", outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: operatorSkippedSummary}, true)
 
 	d, err := svc.Next(context.Background(), "obs-1", "", "")
 	if err != nil {
@@ -1142,7 +1141,7 @@ func TestNext_OnAStepThatWasSkippedDecidesNothing(t *testing.T) {
 //
 // The step is the step the run is on: the run holds a judgment about
 // it.
-func pausedRun(t *testing.T, svc *Service, stepID string, outcome wfe.Outcome, ran bool) *run {
+func pausedRun(t *testing.T, svc *Service, stepID string, outcome outcome.Outcome, ran bool) *run {
 	t.Helper()
 	r := testRun(t, svc, "two")
 	t.Cleanup(r.cancel)
@@ -1540,8 +1539,8 @@ func TestTheModelPathFollowsTheStepOfTheCommand(t *testing.T) {
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed", Data: map[string]string{"error": "the commit failed"}}},
-		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "pushed"}},
+		{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "the commit failed", Data: map[string]string{"error": "the commit failed"}}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "pushed"}},
 	}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -1570,9 +1569,9 @@ func TestAnIterationKeepsItsCard(t *testing.T) {
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed", Data: map[string]string{"error": "the commit failed"}}},
-		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "pushed"}},
-		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "tagged"}},
+		{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "the commit failed", Data: map[string]string{"error": "the commit failed"}}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "pushed"}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "tagged"}},
 	}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -1612,9 +1611,9 @@ func TestACardTheChatRefusedIsPublishedLater(t *testing.T) {
 	// attempt — and takes the one that comes after it.
 	op.refuseAttempt = 2
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed", Data: map[string]string{"error": "the commit failed"}}},
-		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "pushed"}},
-		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "tagged"}},
+		{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "the commit failed", Data: map[string]string{"error": "the commit failed"}}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "pushed"}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "tagged"}},
 	}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -1644,8 +1643,8 @@ func TestTheCardOfAnAnsweredQuestionOffersNoChoice(t *testing.T) {
 	}}
 	svc, op := testService(t, dir, Config{Decider: decider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed", Data: map[string]string{"error": "the commit failed"}}},
-		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "pushed"}},
+		{outcome: outcome.Outcome{Success: false, Status: http.StatusInternalServerError, StatusText: "the commit failed", Data: map[string]string{"error": "the commit failed"}}},
+		{outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "pushed"}},
 	}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -1770,10 +1769,11 @@ jobs:
 
 // failedStep is a step that breaks.
 func failedStep(summary string) fakeStep {
-	return fakeStep{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: summary,
-		Data:    map[string]string{"error": summary},
+	return fakeStep{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: summary,
+		Data:       map[string]string{"error": summary},
 	}}
 }
 
@@ -1840,7 +1840,7 @@ func waitForStepSummary(t *testing.T, r *run, stepID, summary string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if out, ok := stepOutcome(r, stepID); ok && out.Summary == summary {
+		if out, ok := stepOutcome(r, stepID); ok && out.StatusText == summary {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
@@ -1849,7 +1849,7 @@ func waitForStepSummary(t *testing.T, r *run, stepID, summary string) {
 	if !ok {
 		t.Fatalf("the step %q has no state", stepID)
 	}
-	t.Fatalf("the step %q ended as %q, want %q", stepID, out.Summary, summary)
+	t.Fatalf("the step %q ended as %q, want %q", stepID, out.StatusText, summary)
 }
 
 // waitForAction waits until the run's history holds that many actions
@@ -1939,10 +1939,11 @@ func TestTheDecisionCarriesTheReasonFirst(t *testing.T) {
 		decisionResp("jev", optionEscalate, 0.1, 0),
 	}}
 	svc, op := testService(t, dir, Config{Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "the command failed",
-		Data:    map[string]string{"error": "the command failed"},
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the command failed",
+		Data:       map[string]string{"error": "the command failed"},
 	}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{

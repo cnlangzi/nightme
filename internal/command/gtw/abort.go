@@ -18,11 +18,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // abortCmdSpec declares /gtw abort's argv grammar for the shared
@@ -59,7 +60,7 @@ func aborted(ctx context.Context) bool {
 // as one OutCommandReply.
 func (f *Factory) runAbort(ctx context.Context, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	if _, err := command.ParseCmdArgs(input.Args[2:], abortCmdSpec); err != nil {
-		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -68,18 +69,19 @@ func (f *Factory) runAbort(ctx context.Context, _ *chatsession.ChatSession, inpu
 
 	sub, elapsed, ok := f.mgr.abortRun(input.ChatID)
 	if !ok {
-		reportOutcome(ctx, command.NoopOutcome("no /gtw command was running", nil))
+		reportOutcome(ctx, command.SuccessOutcome("no /gtw command was running", nil))
 		return &command.SlashOutput{
 			Reply:    "✨ nothing to abort",
 			Consumed: true,
 		}, nil
 	}
-	reportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: fmt.Sprintf("aborted /gtw %s", sub),
+	reportOutcome(ctx, outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: fmt.Sprintf("aborted /gtw %s", sub),
 		Data: map[string]string{
-			"subcommand": sub,
-			"elapsed":    elapsed.String(),
+			KeySubcommand: sub,
+			KeyElapsed:    elapsed.String(),
 		},
 	})
 	return &command.SlashOutput{

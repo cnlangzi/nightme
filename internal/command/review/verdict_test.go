@@ -14,6 +14,7 @@ package review
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,7 +25,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // initGitRepo creates a throwaway git repository with one commit, so
@@ -77,21 +77,18 @@ func TestReviewContinueVerdict(t *testing.T) {
 		name string
 		// fix makes the coding agent commit the fixes.
 		fix  bool
-		want messages.OutcomeStatus
-		// reason is the reason code the outcome must carry.
-		reason string
-		// wantErr says the outcome must carry an error description.
+		want int
+		// wantErr says the outcome must be an exception.
 		wantErr bool
 	}{
 		{
 			name: "the findings were fixed",
 			fix:  true,
-			want: messages.OutcomeOK,
+			want: http.StatusOK,
 		},
 		{
 			name:    "the findings were left unaddressed",
-			want:    messages.OutcomeFailed,
-			reason:  "not_fixed",
+			want:    http.StatusConflict,
 			wantErr: true,
 		},
 	}
@@ -148,17 +145,14 @@ func TestReviewContinueVerdict(t *testing.T) {
 
 			got := waitOutcome(t, em, 5*time.Second)
 			if got.Status != tc.want {
-				t.Fatalf("outcome status = %s, want %s (outcome %+v)", got.Status, tc.want, got)
-			}
-			if tc.reason != "" && got.Data["reason"] != tc.reason {
-				t.Errorf("outcome reason = %q, want %q", got.Data["reason"], tc.reason)
+				t.Fatalf("outcome status = %d, want %d (outcome %+v)", got.Status, tc.want, got)
 			}
 			if tc.wantErr {
-				if got.Data["error"] == "" {
-					t.Errorf("an exception carries an error description, got none: %v", got.Data)
+				if got.Success {
+					t.Errorf("an exception is not a success: %v", got)
 				}
-			} else if desc, ok := got.Data["error"]; ok {
-				t.Errorf("a normal result carries no error description, got %q", desc)
+			} else if got.Exception() {
+				t.Errorf("a normal result is not an exception: %v", got)
 			}
 		})
 	}
@@ -174,27 +168,24 @@ func TestReviewVerdict(t *testing.T) {
 		findings int
 		// fix makes the coding agent commit the fixes.
 		fix  bool
-		want messages.OutcomeStatus
-		// reason is the reason code the outcome must carry.
-		reason string
-		// wantErr says the outcome must carry an error description.
+		want int
+		// wantErr says the outcome must be an exception.
 		wantErr bool
 	}{
 		{
 			name: "nothing to fix",
-			want: messages.OutcomeOK,
+			want: http.StatusOK,
 		},
 		{
 			name:     "the findings were fixed",
 			findings: 2,
 			fix:      true,
-			want:     messages.OutcomeOK,
+			want:     http.StatusOK,
 		},
 		{
 			name:     "the findings were left unaddressed",
 			findings: 2,
-			want:     messages.OutcomeFailed,
-			reason:   "not_fixed",
+			want:     http.StatusConflict,
 			wantErr:  true,
 		},
 	}
@@ -247,15 +238,12 @@ func TestReviewVerdict(t *testing.T) {
 
 			got := waitOutcome(t, em, 5*time.Second)
 			assertOutcome(t, got, tc.want, map[string]string{"agent": "reviewer"})
-			if tc.reason != "" {
-				assertOutcome(t, got, tc.want, map[string]string{"reason": tc.reason})
-			}
 			if tc.wantErr {
-				if got.Data["error"] == "" {
-					t.Errorf("an exception carries an error description, got none: %v", got.Data)
+				if got.Success {
+					t.Errorf("an exception is not a success: %v", got)
 				}
-			} else if desc, ok := got.Data["error"]; ok {
-				t.Errorf("a normal result carries no error description, got %q", desc)
+			} else if got.Exception() {
+				t.Errorf("a normal result is not an exception: %v", got)
 			}
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -76,20 +78,36 @@ func toolErrorf(format string, args ...any) error {
 
 // stepResult is the result of a command the run sent to the the
 // chat.
+//
+// The verdict is the outcome contract's own: a status, the words that
+// say what happened, and the facts the command reported.
 type stepResult struct {
-	// Status is the machine-readable verdict.
-	Status string `json:"status"`
-	// Summary is the one-line restatement of what happened.
-	Summary string `json:"summary"`
-	// Data carries the facts the command reported.
-	Data map[string]string `json:"data,omitempty"`
+	outcome.Outcome
 	// Transcript is the tail of what the coding agent said.
 	Transcript string `json:"transcript,omitempty"`
 	// entries is the whole transcript of the execution. It is not
 	// part of the tool result — the model reads the truncated
 	// transcript above — but the run scans every line of it.
 	entries []observe.Entry
+	// phase says where the command stands.
+	phase stepPhase
 }
+
+// stepPhase says where a command stands.
+type stepPhase int
+
+const (
+	// phaseSettled means the command reported a verdict.
+	phaseSettled stepPhase = iota
+	// phaseWaiting means the command is still running: it has no
+	// verdict yet.
+	phaseWaiting
+	// phaseAbandoned means the operator passed the command over
+	// while it was in flight.
+	phaseAbandoned
+	// phaseInterrupted means the execution of the command is gone.
+	phaseInterrupted
+)
 
 // toolCatalogue returns the tools the chat model may call.
 //
@@ -269,16 +287,21 @@ func (s *Service) runPendingCalls(ctx context.Context, r *run) error {
 		if err != nil {
 			var te *toolError
 			if errors.As(err, &te) {
-				s.publishToolEnd(ctx, r, sess, call, stepResult{Status: "error", Summary: te.Error()}, nil)
+				refused := stepResult{Outcome: outcome.Outcome{
+					Success:    false,
+					Status:     http.StatusBadRequest,
+					StatusText: te.Error(),
+				}}
+				s.publishToolEnd(ctx, r, sess, call, refused, nil)
 				s.refreshRun(r)
-				s.appendToolResult(r, call, stepResult{Status: "error", Summary: te.Error()}, true)
+				s.appendToolResult(r, call, refused, true)
 				r.dropPendingCall()
 				continue
 			}
 			s.publishToolEnd(ctx, r, sess, call, stepResult{}, err)
 			return err
 		}
-		if res.Status != statusWaiting {
+		if res.phase != phaseWaiting {
 			// The call settled. A call whose command is still running
 			// has no verdict yet: the result comes when the run picks
 			// the command up again.
@@ -375,7 +398,7 @@ func (s *Service) toolResume(ctx context.Context, r *run, _ pendingCall) (stepRe
 // like the budget of any other action.
 func (s *Service) runStepAgain(ctx context.Context, r *run, step wfe.Step, freshBudget bool) (stepResult, error) {
 	if freshBudget {
-		r.record(wfe.ActionKindReset, "", step.ID, wfe.Outcome{})
+		r.record(wfe.ActionKindReset, "", step.ID, outcome.Outcome{})
 	}
 	if err := r.checkStep(step); err != nil {
 		return stepResult{}, toolErrorf("%s", err.Error())
@@ -391,14 +414,12 @@ func (s *Service) runStepAgain(ctx context.Context, r *run, step wfe.Step, fresh
 	}
 	if !verdict.Settled {
 		// The step is still running: it has no verdict yet.
-		return stepResult{Status: statusWaiting, Summary: verdict.Outcome.Summary}, nil
+		return stepResult{Outcome: noVerdict(verdict.Outcome.StatusText), phase: phaseWaiting}, nil
 	}
 	r.recordStep(job, step, verdict.Outcome)
 	s.refreshRun(r)
 	return stepResult{
-		Status:     string(verdict.Outcome.Status),
-		Summary:    verdict.Outcome.Summary,
-		Data:       verdict.Outcome.Data,
+		Outcome:    verdict.Outcome,
 		Transcript: verdict.Transcript,
 	}, nil
 }
@@ -434,7 +455,7 @@ func (s *Service) toolNext(ctx context.Context, r *run, _ pendingCall) (stepResu
 // history agrees with the run state: the step is skipped, and the run
 // says so.
 func (s *Service) skipStep(ctx context.Context, r *run, step wfe.Step, summary string) stepResult {
-	out := wfe.Outcome{}
+	out := outcome.Outcome{}
 	if st, ok := r.stepState(step.ID); ok {
 		out = st.Outcome
 	}
@@ -443,13 +464,9 @@ func (s *Service) skipStep(ctx context.Context, r *run, step wfe.Step, summary s
 	r.recordStep(job, step, skipped)
 	// The history has to agree with the run state: the step is
 	// skipped, and the run says so.
-	r.record(wfe.ActionKindRun, s.stepCommand(r, step), step.ID, skipped)
+	r.recordSkipped(s.stepCommand(r, step), step.ID, skipped)
 	s.refreshRun(r)
-	return stepResult{
-		Status:  string(skipped.Status),
-		Summary: skipped.Summary,
-		Data:    skipped.Data,
-	}
+	return stepResult{Outcome: skipped}
 }
 
 // stepCommand renders the command a step runs, the way the run records
@@ -515,9 +532,12 @@ func (s *Service) toolAgent(ctx context.Context, r *run, call pendingCall) (step
 		data["model"] = reply.Model
 	}
 	return stepResult{
-		Status:     string(wfe.OutcomeOK),
-		Summary:    summary,
-		Data:       data,
+		Outcome: outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: summary,
+			Data:       data,
+		},
 		Transcript: transcript,
 	}, nil
 }
@@ -576,7 +596,7 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 	// No chain covers this command: its result is the run's own, so it
 	// is the result that may hold the run up.
 	s.pauseForRateLimit(ctx, r, res)
-	if res.Status == statusWaiting {
+	if res.phase == phaseWaiting {
 		// The command is still running: the step has no verdict yet.
 		// A repair changes nothing: the command it started is picked
 		// up where it left off.
@@ -585,16 +605,12 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 		}
 		return res, nil
 	}
-	if res.Status == statusAbandoned || (owned && r.stepSkipped(step.ID)) {
+	if res.phase == phaseAbandoned || (owned && r.stepSkipped(step.ID)) {
 		// The step was passed over while its command was in flight: the
 		// verdict that comes late does not put it back into the plan.
 		return res, nil
 	}
-	out := wfe.Outcome{
-		Status:  outcomeStatus(res.Status),
-		Summary: res.Summary,
-		Data:    res.Data,
-	}
+	out := res.Outcome
 	if !hasStep {
 		// The action still happened, so it is recorded — the budget
 		// has to know about it. The command belongs to no step, so it
@@ -664,14 +680,10 @@ func (s *Service) toolInstruct(ctx context.Context, r *run, call pendingCall) (s
 	// No chain covers the instruction: its result is the run's own, so
 	// it is the result that may hold the run up.
 	s.pauseForRateLimit(ctx, r, res)
-	if res.Status != statusWaiting {
+	if res.phase != phaseWaiting {
 		// The instruction is a repair: it is work the agent causes, so
 		// it costs a chance of the step the run is on.
-		r.record(wfe.ActionKindInstruct, text, r.budgetStep(), wfe.Outcome{
-			Status:  outcomeStatus(res.Status),
-			Summary: res.Summary,
-			Data:    res.Data,
-		})
+		r.record(wfe.ActionKindInstruct, text, r.budgetStep(), res.Outcome)
 	}
 	return res, nil
 }
@@ -728,7 +740,7 @@ func (s *Service) toolAnswerChoice(ctx context.Context, r *run, call pendingCall
 	}); err != nil {
 		return stepResult{}, toolErrorf("the prompt could not be answered: %v", err)
 	}
-	return stepResult{Status: "ok", Summary: "answered: " + label}, nil
+	return stepResult{Outcome: outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "answered: " + label}}, nil
 }
 
 // toolAskHuman asks the user and waits for the answer.
@@ -741,7 +753,12 @@ func (s *Service) toolAskHuman(ctx context.Context, r *run, call pendingCall) (s
 	if err != nil {
 		return stepResult{}, err
 	}
-	return stepResult{Status: "ok", Summary: "the user answered: " + reply, Data: map[string]string{"answer": reply}}, nil
+	return stepResult{Outcome: outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the user answered: " + reply,
+		Data:       map[string]string{KeyAnswer: reply},
+	}}, nil
 }
 
 // toolRepoStatus reads the repository facts of the chat.
@@ -759,8 +776,8 @@ func (s *Service) toolRepoStatus(ctx context.Context, r *run, _ pendingCall) (st
 	}
 	data := map[string]string{
 		outcomeKeyBranch: facts.Branch,
-		"dirty":          strconv.FormatBool(facts.Dirty),
-		"cwd":            dir,
+		BoolKeyDirty:     strconv.FormatBool(facts.Dirty),
+		KeyCwd:           dir,
 	}
 	if facts.Upstream != "" {
 		data["upstream"] = facts.Upstream
@@ -776,7 +793,12 @@ func (s *Service) toolRepoStatus(ctx context.Context, r *run, _ pendingCall) (st
 	if facts.Dirty {
 		summary += " (dirty)"
 	}
-	return stepResult{Status: "ok", Summary: summary, Data: data}, nil
+	return stepResult{Outcome: outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: summary,
+		Data:       data,
+	}}, nil
 }
 
 // toolWait waits for a duration before the model looks again.
@@ -820,10 +842,11 @@ func (s *Service) toolWait(ctx context.Context, r *run, call pendingCall) (stepR
 	if capped {
 		summary += " (a wait lasts at most 10 minutes)"
 	}
-	return stepResult{
-		Status:  string(wfe.OutcomeOK),
-		Summary: summary,
-	}, nil
+	return stepResult{Outcome: outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: summary,
+	}}, nil
 }
 
 // toolEndRound ends the round of the job the run is on.
@@ -846,10 +869,11 @@ func (s *Service) toolEndRound(ctx context.Context, r *run, _ pendingCall) (step
 	// decides again.
 	r.markSituation()
 	s.refreshRun(r)
-	return stepResult{
-		Status:  string(wfe.OutcomeOK),
-		Summary: fmt.Sprintf("the round %d of %s is over", round, job),
-	}, nil
+	return stepResult{Outcome: outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: fmt.Sprintf("the round %d of %s is over", round, job),
+	}}, nil
 }
 
 // toolFinish ends the run.
@@ -876,7 +900,15 @@ func (s *Service) toolFinish(ctx context.Context, r *run, call pendingCall) (ste
 		s.finish(r, PhaseDone, "")
 	}
 	s.refreshRun(r)
-	return stepResult{Status: status, Summary: summary}, nil
+	code := http.StatusOK
+	if status == "failed" {
+		code = http.StatusInternalServerError
+	}
+	return stepResult{Outcome: outcome.Outcome{
+		Success:    status != "failed",
+		Status:     code,
+		StatusText: summary,
+	}}, nil
 }
 
 // finishLine renders the summary of a finished run.
@@ -893,40 +925,6 @@ func finishLine(r *run, status, summary string) string {
 	line := fmt.Sprintf("%s %s · %d actions · system-1: %d decisions, %d tokens · system-2: %d decisions, %d tokens",
 		icon, strings.TrimSpace(summary), actions, s1, u1.Total(), s2, u2.Total())
 	return line
-}
-
-// The statuses a step result can carry beyond the outcome
-// vocabulary.
-const (
-	// statusWaiting means the step is still running.
-	statusWaiting = "waiting"
-	// statusInterrupted means the execution of the step is gone.
-	statusInterrupted = "interrupted"
-	// statusAbandoned means the operator passed the step over while
-	// its command was in flight.
-	statusAbandoned = "abandoned"
-)
-
-// outcomeStatus maps a step result status onto the outcome
-// vocabulary.
-//
-// An interrupted command reported no verdict, so it is recorded as
-// unknown — the vocabulary's way of saying that nobody said anything.
-// An abandoned command reported no verdict either.
-func outcomeStatus(status string) wfe.OutcomeStatus {
-	if status == statusInterrupted || status == statusAbandoned {
-		return wfe.OutcomeUnknown
-	}
-	return wfe.OutcomeStatus(status)
-}
-
-// outcomeSucceeded reports whether a step result status means the
-// work was done.
-//
-// "noop" counts: the request was valid and the world already
-// satisfied it, so the step did what it was asked to do.
-func outcomeSucceeded(status string) bool {
-	return status == string(wfe.OutcomeOK) || status == string(wfe.OutcomeNoop)
 }
 
 // runCommand sends a command to the chat and waits for it.
@@ -985,7 +983,7 @@ func (s *Service) runCommandInner(ctx context.Context, r *run, command string, i
 			// The execution is gone: the daemon that carried it is
 			// no longer watching it.
 			r.clearInflight()
-			return stepResult{Status: statusInterrupted, Summary: "the command was interrupted"}, nil
+			return stepResult{Outcome: noVerdict("the command was interrupted"), phase: phaseInterrupted}, nil
 		case ex.Phase == observe.PhaseSettled:
 			r.clearInflight()
 			return resultOf(ex), nil
@@ -1036,14 +1034,14 @@ func (s *Service) watchCommand(ctx context.Context, r *run, msgID, command strin
 		case <-abandon:
 			// The command was abandoned: the wait ends, and the run
 			// goes on to its next step.
-			return stepResult{Status: statusAbandoned, Summary: "the command was abandoned"}, nil
+			return stepResult{Outcome: noVerdict("the command was abandoned"), phase: phaseAbandoned}, nil
 		case ex, ok := <-ch:
 			if !ok {
 				// The watcher was closed without a final snapshot.
 				ex, found := s.cfg.Operator.Get(msgID)
 				if !found {
 					r.clearInflight()
-					return stepResult{Status: string(wfe.OutcomeUnknown), Summary: "the command was interrupted"}, nil
+					return stepResult{Outcome: noVerdict("the command was interrupted"), phase: phaseInterrupted}, nil
 				}
 				if ex.Phase != observe.PhaseSettled {
 					// The watcher closed while the command was
@@ -1082,16 +1080,12 @@ func truncate(text string, n int) string {
 // waitingResult builds the result of a command that is not finished
 // yet.
 func (s *Service) waitingResult(reason string) stepResult {
-	return stepResult{Status: statusWaiting, Summary: reason}
+	return stepResult{Outcome: noVerdict(reason), phase: phaseWaiting}
 }
 
 // resultOf turns a settled execution into the result of a command.
 func resultOf(ex observe.Execution) stepResult {
-	res := stepResult{
-		Status:  string(ex.Outcome.Status),
-		Summary: ex.Outcome.Summary,
-		Data:    ex.Outcome.Data,
-	}
+	res := stepResult{Outcome: ex.Outcome}
 	res.Transcript = transcriptOf(ex)
 	res.entries = ex.Transcript
 	return res

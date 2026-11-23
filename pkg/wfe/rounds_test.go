@@ -1,8 +1,11 @@
 package wfe
 
 import (
+	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // repeatingYAML is a workflow whose job runs two rounds.
@@ -21,7 +24,7 @@ jobs:
 // runWholeJob records every step of the job as done.
 func runWholeJob(state *RunState, wf *Workflow, job string) {
 	for _, step := range wf.Jobs[job].Steps {
-		RecordStep(state, job, step, Outcome{Status: OutcomeOK}, false)
+		RecordStep(state, job, step, outcome.Outcome{Success: true, Status: http.StatusOK}, false)
 	}
 }
 
@@ -55,11 +58,12 @@ func TestDecide_TheNextRoundReadsItsOwnOutputs(t *testing.T) {
 
 	// Round 1: fix picks an issue, the job's other step runs, the
 	// round ends.
-	RecordStep(state, "ship", fix, Outcome{
-		Status: OutcomeOK,
-		Data:   map[string]string{"issue": "42"},
+	RecordStep(state, "ship", fix, outcome.Outcome{
+		Success: true,
+		Status:  http.StatusOK,
+		Data:    map[string]string{"issue": "42"},
 	}, false)
-	RecordStep(state, "ship", ship, Outcome{Status: OutcomeOK}, false)
+	RecordStep(state, "ship", ship, outcome.Outcome{Success: true, Status: http.StatusOK}, false)
 	if _, err := Decide(state, wf); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -69,9 +73,10 @@ func TestDecide_TheNextRoundReadsItsOwnOutputs(t *testing.T) {
 	}
 
 	// Round 2: fix picks the next issue.
-	RecordStep(state, "ship", fix, Outcome{
-		Status: OutcomeOK,
-		Data:   map[string]string{"issue": "43"},
+	RecordStep(state, "ship", fix, outcome.Outcome{
+		Success: true,
+		Status:  http.StatusOK,
+		Data:    map[string]string{"issue": "43"},
 	}, false)
 	if got := EvalString("${{ steps.fix.outputs.data.issue }}", ExprContext(state)); got != "43" {
 		t.Errorf("the second round's issue = %q, want 43", got)
@@ -146,9 +151,10 @@ func TestDecide_AFailedStepIsNotSwallowedByTheNextRound(t *testing.T) {
 	state := newRunState(wf)
 	runWholeJob(state, wf, "ship")
 	// The last step of the round broke.
-	state.Steps[len(state.Steps)-1].Outcome = Outcome{
-		Status: OutcomeFailed,
-		Data:   map[string]string{"error": "the worktree could not be created"},
+	state.Steps[len(state.Steps)-1].Outcome = outcome.Outcome{
+		Success: false,
+		Status:  http.StatusInternalServerError,
+		Data:    map[string]string{"error": "the worktree could not be created"},
 	}
 
 	decision, err := Decide(state, wf)
@@ -171,9 +177,11 @@ func TestDecide_ANormalBranchLetsTheRoundAdvance(t *testing.T) {
 	state := newRunState(wf)
 	runWholeJob(state, wf, "ship")
 	// The last step of the round had nothing to do.
-	state.Steps[len(state.Steps)-1].Outcome = Outcome{
-		Status: OutcomeFailed,
-		Data:   map[string]string{"reason": "nothing_to_commit"},
+	state.Steps[len(state.Steps)-1].Outcome = outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the worktree has nothing to commit",
+		Data:       map[string]string{"commits": "0"},
 	}
 
 	decision, err := Decide(state, wf)
@@ -201,9 +209,10 @@ jobs:
 `)
 	state := newRunState(wf)
 	runWholeJob(state, wf, "ship")
-	state.Steps[len(state.Steps)-1].Outcome = Outcome{
-		Status: OutcomeFailed,
-		Data:   map[string]string{"error": "the worktree could not be created"},
+	state.Steps[len(state.Steps)-1].Outcome = outcome.Outcome{
+		Success: false,
+		Status:  http.StatusInternalServerError,
+		Data:    map[string]string{"error": "the worktree could not be created"},
 	}
 
 	decision, err := Decide(state, wf)
@@ -232,9 +241,10 @@ jobs:
 	state := newRunState(wf)
 	// The step's condition does not hold, so the plan skips it and
 	// the round does nothing.
-	RecordStep(state, "ship", wf.Jobs["ship"].Steps[0], Outcome{
-		Status:  OutcomeNoop,
-		Summary: "the step's condition did not hold",
+	RecordStep(state, "ship", wf.Jobs["ship"].Steps[0], outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the step's condition did not hold",
 	}, true)
 
 	decision, err := Decide(state, wf)

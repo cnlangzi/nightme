@@ -17,12 +17,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // reviewDelivery is what a finished review run hands to the delivery.
@@ -162,11 +164,12 @@ func (f *Factory) deliver(d reviewDelivery) {
 		//
 		// The report says the findings were not delivered: the
 		// delivery's own report said the opposite, and the two merge.
-		d.work.Report(messages.Outcome{
-			Status:  messages.OutcomeIncomplete,
-			Summary: "review findings could not be delivered to the agent",
+		d.work.Report(outcome.Outcome{
+			Success:    false,
+			Status:     http.StatusInternalServerError,
+			StatusText: "review findings could not be delivered to the agent",
 			Data: map[string]string{
-				"agent": d.runner, "reason": "inject_failed", "delivered": "false",
+				KeyAgent: d.runner, BoolKeyDelivered: "false",
 			},
 		})
 		injectWork.Release()
@@ -211,10 +214,12 @@ func injectionRefusalLine(err error) string {
 // good, which is not a clean result. A review that is not over yet is
 // incomplete: the findings are in, but the review is not.
 func (d reviewDelivery) report(verdict verdict, pending bool) {
-	status := messages.OutcomeOK
+	success := true
+	status := http.StatusOK
 	summary := "review delivered"
 	if pending || len(verdict.failed) > 0 {
-		status = messages.OutcomeIncomplete
+		success = false
+		status = http.StatusInternalServerError
 		summary = fmt.Sprintf("%d of %d groups unfinished", len(verdict.failed), verdict.groups)
 	}
 	data := d.data
@@ -228,10 +233,11 @@ func (d reviewDelivery) report(verdict verdict, pending bool) {
 		data["findings"] = strconv.Itoa(verdict.findings)
 	}
 	data["delivered"] = strconv.FormatBool(!pending)
-	d.work.Report(messages.Outcome{
-		Status:  status,
-		Summary: summary,
-		Data:    data,
+	d.work.Report(outcome.Outcome{
+		Success:    success,
+		Status:     status,
+		StatusText: summary,
+		Data:       data,
 	})
 }
 

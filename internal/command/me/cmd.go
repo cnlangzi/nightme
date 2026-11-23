@@ -32,13 +32,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	mesvc "github.com/cnlangzi/nightme/internal/me"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // The summary of a command that answers with the state of the run: the
@@ -107,7 +108,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
 	if f.ctrl == nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("no_agent", "the personal agent is not available"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the personal agent is not available"))
 		return command.Reply(ctx, rt, "❌ The personal agent is not available in this daemon."), nil
 	}
 	if len(input.Args) < 2 {
@@ -130,7 +131,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	case "status":
 		return f.status(ctx, rt, input)
 	default:
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return command.Reply(ctx, rt, "❌ Unknown /me subcommand: "+input.Args[1]+"\nUsage: "+f.Spec().Usage), nil
 	}
 }
@@ -141,12 +142,12 @@ func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 
 	parsed, iterations, err := parseStartArgs(input.Args[2:])
 	if err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	cwd, failOut := command.RequireActiveCwd(cs)
 	if failOut != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("no_cwd", "the command needs an active workspace"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command needs an active workspace"))
 		return failOut, nil
 	}
 
@@ -162,17 +163,18 @@ func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 		MessageID:  input.MessageID,
 	})
 	if err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the workflow could not be started"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the workflow could not be started"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
-	data := map[string]string{"workflow": workflow, "run_id": runID}
+	data := map[string]string{KeyWorkflow: workflow, KeyRunID: runID}
 	if iterations != nil {
 		data["iterations"] = strconv.Itoa(*iterations)
 	}
-	chatsession.ReportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: "started " + workflow,
-		Data:    data,
+	chatsession.ReportOutcome(ctx, outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "started " + workflow,
+		Data:       data,
 	})
 	// The run's own card carries the acknowledgement: one command posts
 	// one card.
@@ -207,16 +209,17 @@ func parseStartArgs(argv []string) (command.ParsedArgs, *int, error) {
 func (f *Factory) reply(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	text := replyText(input.Text)
 	if text == "" {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return command.Reply(ctx, rt, "Usage: /me reply <text>"), nil
 	}
 	if err := f.ctrl.Reply(ctx, input.ChatID, text); err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the reply could not be delivered"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the reply could not be delivered"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
-	chatsession.ReportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: "the reply was delivered",
+	chatsession.ReportOutcome(ctx, outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the reply was delivered",
 	})
 	return command.Reply(ctx, rt, "✅ The reply was delivered."), nil
 }
@@ -224,12 +227,13 @@ func (f *Factory) reply(ctx context.Context, rt command.RuntimeServices, input c
 // pause stops the run after the step it is on.
 func (f *Factory) pause(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	if err := f.ctrl.Pause(ctx, input.ChatID, input.MessageID); err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the run could not be paused"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the run could not be paused"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
-	chatsession.ReportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: "the run pauses after the current step",
+	chatsession.ReportOutcome(ctx, outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the run pauses after the current step",
 	})
 	return &command.SlashOutput{Consumed: true}, nil
 }
@@ -244,17 +248,18 @@ func (f *Factory) resume(ctx context.Context, rt command.RuntimeServices, input 
 	note := decisionNote(input.Text)
 	d, err := f.ctrl.Resume(ctx, input.ChatID, input.MessageID, note)
 	if err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome(refusalReason(err), err.Error()))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(refusalStatus(err), err.Error()))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	if !d.Act {
 		nothingDone(ctx, d.Step)
 		return &command.SlashOutput{Consumed: true}, nil
 	}
-	chatsession.ReportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: "the step runs again",
-		Data:    map[string]string{"step": d.Step},
+	chatsession.ReportOutcome(ctx, outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the step runs again",
+		Data:       map[string]string{KeyStep: d.Step},
 	})
 	return &command.SlashOutput{Consumed: true}, nil
 }
@@ -268,17 +273,18 @@ func (f *Factory) next(ctx context.Context, rt command.RuntimeServices, input co
 	note := decisionNote(input.Text)
 	d, err := f.ctrl.Next(ctx, input.ChatID, input.MessageID, note)
 	if err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome(refusalReason(err), err.Error()))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(refusalStatus(err), err.Error()))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	if !d.Act {
 		nothingDone(ctx, d.Step)
 		return &command.SlashOutput{Consumed: true}, nil
 	}
-	chatsession.ReportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: "the step is skipped",
-		Data:    map[string]string{"step": d.Step},
+	chatsession.ReportOutcome(ctx, outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the step is skipped",
+		Data:       map[string]string{KeyStep: d.Step},
 	})
 	return &command.SlashOutput{Consumed: true}, nil
 }
@@ -289,16 +295,23 @@ func (f *Factory) next(ctx context.Context, rt command.RuntimeServices, input co
 // to do to the step. The card of the command says what did not happen,
 // so the operator can tell that their command did nothing.
 func nothingDone(ctx context.Context, step string) {
-	chatsession.ReportOutcome(ctx, command.NoopOutcome(stateShownSummary, map[string]string{"step": step}))
+	chatsession.ReportOutcome(ctx, command.SuccessOutcome(stateShownSummary, map[string]string{KeyStep: step}))
 }
 
-// refusalReason returns the stable code of a refusal, or the generic
-// one when the failure is not a refusal.
-func refusalReason(err error) string {
-	if reason := mesvc.RefusalReason(err); reason != "" {
-		return reason
+// refusalStatus maps a refusal onto the status of the outcome that
+// reports it.
+//
+// The chat holds no run: the run is not there (404). The run waits
+// for an answer: it asked a question of its own (409). Anything else
+// is a failure of the command itself.
+func refusalStatus(err error) int {
+	switch mesvc.RefusalReason(err) {
+	case mesvc.ReasonNoRun:
+		return http.StatusNotFound
+	case mesvc.ReasonNotPaused:
+		return http.StatusConflict
 	}
-	return "error"
+	return http.StatusInternalServerError
 }
 
 // stop stops the run of this chat.
@@ -308,12 +321,13 @@ func refusalReason(err error) string {
 // the record are one card.
 func (f *Factory) stop(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	if err := f.ctrl.Stop(ctx, input.ChatID, input.MessageID); err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the run could not be stopped"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the run could not be stopped"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
-	chatsession.ReportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: "the run was stopped",
+	chatsession.ReportOutcome(ctx, outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the run was stopped",
 	})
 	return command.Reply(ctx, rt, "⏹ The run was stopped — the record is on its way. The turn of the chat agent goes on."), nil
 }
@@ -327,26 +341,27 @@ func (f *Factory) stop(ctx context.Context, rt command.RuntimeServices, input co
 func (f *Factory) status(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	err := f.ctrl.Status(ctx, input.ChatID, input.MessageID)
 	if err == nil {
-		chatsession.ReportOutcome(ctx, messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: stateShownSummary,
+		chatsession.ReportOutcome(ctx, outcome.Outcome{
+			Success:    true,
+			Status:     http.StatusOK,
+			StatusText: stateShownSummary,
 		})
 		// The state is on the card of the command: the command posts no
 		// reply of its own.
 		return &command.SlashOutput{Consumed: true}, nil
 	}
 	if !errors.Is(err, mesvc.ErrNoRun) {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the run's state could not be shown"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusInternalServerError, "the run's state could not be shown"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	// The personal agent cannot start a run at all: the reply says why,
 	// so the operator knows the difference between a chat that has no
 	// run and a daemon that cannot make one.
 	if reason := f.ctrl.DisabledReason(); reason != "" {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("no_agent", reason))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, reason))
 		return command.Reply(ctx, rt, "This chat has no run in it. — me is disabled: "+reason), nil
 	}
-	chatsession.ReportOutcome(ctx, command.NoopOutcome("this chat has no run in it", nil))
+	chatsession.ReportOutcome(ctx, command.SuccessOutcome("this chat has no run in it", nil))
 	return command.Reply(ctx, rt, "This chat has no run in it."), nil
 }
 

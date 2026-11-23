@@ -15,6 +15,8 @@ package wfe
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // Workflow is the parsed+validated workflow definition.
@@ -319,7 +321,7 @@ type StepState struct {
 	// Round is the round of the job the step ran in.
 	Round int `json:"round,omitempty"`
 	// Outcome is the step's verdict.
-	Outcome Outcome `json:"outcome"`
+	Outcome outcome.Outcome `json:"outcome"`
 	// Skipped is true when the step's `if:` did not hold.
 	Skipped bool `json:"skipped,omitempty"`
 	// Pending is true when the step started and has not settled yet.
@@ -349,76 +351,6 @@ const (
 	StatusFailed    Status = "failed"
 	StatusCancelled Status = "cancelled"
 )
-
-// OutcomeStatus is the machine-readable verdict of one action.
-type OutcomeStatus string
-
-const (
-	OutcomeOK         OutcomeStatus = "ok"
-	OutcomeNoop       OutcomeStatus = "noop"
-	OutcomeIncomplete OutcomeStatus = "incomplete"
-	OutcomeFailed     OutcomeStatus = "failed"
-	OutcomeCancelled  OutcomeStatus = "cancelled"
-	OutcomeTimeout    OutcomeStatus = "timeout"
-	OutcomeUnknown    OutcomeStatus = "unknown"
-)
-
-// Outcome is the structured result of one action. It mirrors
-// messages.Outcome field for field; wfe keeps its own copy so the
-// engine stays independent of the message layer.
-type Outcome struct {
-	Status  OutcomeStatus     `json:"status"`
-	Summary string            `json:"summary"`
-	Data    map[string]string `json:"data,omitempty"`
-}
-
-// Succeeded reports whether the outcome means the work was done.
-func (o Outcome) Succeeded() bool {
-	return o.Status == OutcomeOK || o.Status == OutcomeNoop
-}
-
-// OutcomeKeyError is the Data key the error description rides in.
-//
-// It is the key the outcome contract names (see
-// messages.OutcomeKeyError): the engine reads it to tell a normal
-// result from a breakage. The engine keeps its own copy of the
-// outcome type, so it keeps its own copy of the key too.
-const OutcomeKeyError = "error"
-
-// OutcomeKeyUnfinished is the Data key the number of unfinished items
-// rides in.
-//
-// The count says how much of the work is still open: a command that
-// finished part of its work reports the number of items it did not
-// finish. It is the switch a consumer reads to decide how to pick the
-// work up — the chain of a step hands the unfinished part over to the
-// next agent, and the count is what tells it that there is a part to
-// hand over. A command that reports no count leaves nothing behind:
-// the next agent runs the whole thing again.
-//
-// The count is a number, not a list: the items themselves stay with
-// the command that produced them.
-const OutcomeKeyUnfinished = "unfinished"
-
-// Exception reports whether the outcome is an exception: the flow
-// cannot go on by itself and the agent has to decide what happens
-// next.
-//
-// The error description says what broke; the status says whether the
-// work got done. A failed outcome without an error description is a
-// normal branch of the work: the step did its job and its answer was
-// "there was nothing to do".
-func (o Outcome) Exception() bool {
-	if o.Data[OutcomeKeyError] != "" {
-		return true
-	}
-	switch o.Status {
-	case OutcomeOK, OutcomeNoop, OutcomeFailed:
-		return false
-	default:
-		return true // cancelled, timeout, incomplete, unknown
-	}
-}
 
 // ActionKind is the kind of action recorded in the history.
 type ActionKind string
@@ -459,12 +391,16 @@ const (
 // Round is the round of the step's job the action was taken in. The
 // per-step budgets count the actions of the current round only.
 type ActionRecord struct {
-	Kind    ActionKind `json:"kind"`
-	Command string     `json:"command"`
-	StepID  string     `json:"step_id,omitempty"`
-	Round   int        `json:"round,omitempty"`
-	Outcome Outcome    `json:"outcome"`
-	At      time.Time  `json:"at"`
+	Kind    ActionKind      `json:"kind"`
+	Command string          `json:"command"`
+	StepID  string          `json:"step_id,omitempty"`
+	Round   int             `json:"round,omitempty"`
+	Outcome outcome.Outcome `json:"outcome"`
+	// Skipped says the step was passed over rather than run. The
+	// history has to agree with the run state, which carries the
+	// same flag.
+	Skipped bool      `json:"skipped,omitempty"`
+	At      time.Time `json:"at"`
 }
 
 // RoundStatus is how a round of a job ended: whether it produced work.

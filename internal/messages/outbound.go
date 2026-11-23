@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // OutboundKind tags the shape of an OutboundMessage. Channels
@@ -347,7 +348,7 @@ type OutboundMessage struct {
 	// Outcome is the structured verdict for OutMessageSettled.
 	// nil for other Kinds. Populated by chatsession when the last
 	// hold on an inbound msgID is released.
-	Outcome *Outcome
+	Outcome *outcome.Outcome
 
 	// GitStatus (F-CLAUDE-PRINT-002) is the workspace + git + PR
 	// context attached to every outbound message that flows to a

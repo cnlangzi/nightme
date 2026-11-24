@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -345,10 +346,12 @@ func TestParse_ARootKeyThatNamesNoTitleIsIgnored(t *testing.T) {
 	}
 }
 
-// TestParse_AFinalStep — a step may say it cleans up after the
-// round.
-func TestParse_AFinalStep(t *testing.T) {
-	wf := mustParse(t, `
+// TestParse_TheRetiredFinalIsNotRead — a step used to name the step
+// that cleans up after the round. The load path ignores the keys the
+// schema does not have, so the file loads and the step is one like any
+// other.
+func TestParse_TheRetiredFinalIsNotRead(t *testing.T) {
+	withFinal := mustParse(t, `
 title: rounds
 jobs:
   main:
@@ -359,12 +362,40 @@ jobs:
         message: "/gtw close"
         final: true
 `)
-	steps := wf.Jobs["main"].Steps
-	if steps[0].Final {
-		t.Error("the step that does not say it is final is final")
+	withoutFinal := mustParse(t, `
+title: rounds
+jobs:
+  main:
+    steps:
+      - id: fix
+        message: "/gtw fix"
+      - id: cleanup
+        message: "/gtw close"
+`)
+	if !reflect.DeepEqual(withFinal.Jobs["main"].Steps, withoutFinal.Jobs["main"].Steps) {
+		t.Errorf("the steps = %+v, want them to be the steps of a file without the key",
+			withFinal.Jobs["main"].Steps)
 	}
-	if !steps[1].Final {
-		t.Error("the step marked `final: true` is not final")
+}
+
+// TestParse_AConditionThatCallsAnUnknownFunctionIsRefused
+// — a condition is parsed when the file is loaded: a function the
+// language does not have is refused there.
+func TestParse_AConditionThatCallsAnUnknownFunctionIsRefused(t *testing.T) {
+	_, err := Parse([]byte(`
+title: x
+jobs:
+  main:
+    steps:
+      - id: one
+        message: "/one"
+        if: ${{ always() }}
+`))
+	if err == nil {
+		t.Fatal("the workflow was loaded")
+	}
+	if !strings.Contains(err.Error(), `unknown function "always"`) {
+		t.Errorf("error = %v, want it to name the function", err)
 	}
 }
 

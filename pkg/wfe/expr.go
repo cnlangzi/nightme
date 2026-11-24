@@ -22,7 +22,6 @@ import (
 //   - ${{ needs.JOB.K }}  → ec.Needs["JOB"]["K"]
 //   - ${{ now }}          → the current time
 //   - ${{ success() }}    → the verdict of the last step that ran
-//   - ${{ always() }}     → true
 //   - ${{ empty(X) }}     → whether X is nothing
 //
 // The `$` is part of the syntax delimiter (matches GitHub Actions).

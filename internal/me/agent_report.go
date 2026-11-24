@@ -37,9 +37,6 @@ func (s *Service) renderWorkflow(r *run) string {
 			if description := strings.TrimSpace(step.Description); description != "" {
 				fmt.Fprintf(&b, "    description: %s\n", description)
 			}
-			if step.Final {
-				b.WriteString("    final: it runs when the round ends, however the round ends\n")
-			}
 		}
 	}
 	return b.String()

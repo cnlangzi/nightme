@@ -1126,10 +1126,10 @@ func (c *fixedCwd) Cwd(string) string { return c.dir }
 
 // ── the round and the wait ─────────────────────────────────────────
 
-// TestEndRoundTool_TheRoundEndsAndTheFinalStepRuns — the agent ends
-// the round of the job the run is on: the steps that did not run are
-// skipped, the final step runs in their place and the job goes on.
-func TestEndRoundTool_TheRoundEndsAndTheFinalStepRuns(t *testing.T) {
+// TestEndRoundTool_NoStepTakesThePlaceOfTheStepsThatDidNotRun — the
+// agent ends the round of the job the run is on: the steps that did
+// not run are skipped, and no step runs in their place.
+func TestEndRoundTool_NoStepTakesThePlaceOfTheStepsThatDidNotRun(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", `title: one
 jobs:
@@ -1141,17 +1141,16 @@ jobs:
         message: /gtw commit
       - id: cleanup
         message: /gtw close
-        final: true
 `)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolEndRound, map[string]any{})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "nothing to do"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	// The first step did not end ok: the run reaches a judgment
-	// point and the agent takes over. The final step runs after the
-	// agent ended the round.
-	op.steps = []fakeStep{pendingStep("nothing to fix"), okStep("closed")}
+	// point and the agent takes over. The round ends there.
+	op.steps = []fakeStep{pendingStep("nothing to fix")}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
@@ -1161,17 +1160,11 @@ jobs:
 	waitRun(t, svc, "obs-1")
 
 	sent := op.Sent()
-	var finalRan bool
 	for _, cmd := range sent {
 		switch cmd {
-		case "/gtw close":
-			finalRan = true
-		case "/gtw commit":
-			t.Fatalf("the step the round cut short ran: %v", sent)
+		case "/gtw commit", "/gtw close":
+			t.Fatalf("a step the round cut short ran: %v", sent)
 		}
-	}
-	if !finalRan {
-		t.Fatalf("the final step did not run: %v", sent)
 	}
 }
 

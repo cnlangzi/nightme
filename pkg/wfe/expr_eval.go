@@ -260,8 +260,6 @@ func evalCall(node *callNode, ec ExprCtx) exprValue {
 	switch node.name {
 	case "success":
 		return boolValue(lastSucceeded(ec))
-	case "always":
-		return boolValue(true)
 	case "empty":
 		value := evalExpr(node.args[0], ec)
 		switch value.kind {

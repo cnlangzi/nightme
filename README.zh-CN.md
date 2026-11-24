@@ -556,7 +556,7 @@ requires:
 
 这个值是一段版本约束：一个比较符（`>=`、`>`、`<=`、`<`、`=`、`!=`）加一个版本，逗号表示"且"——`">=0.10.0, <0.12.0"`。运算符必须写。运行开始时检查这条要求：版本太旧的构建会拒绝这次运行，并把两边的版本都说出来。开发版构建和 CI 版构建没有发布版本号，根本不检查这条要求。
 
-一个 job 带 `needs`、`if`、`iterations` 和 `steps`。`iterations` 是这个 job 跑多少轮：不填就是一轮，`0` 是"一直跑到运行结束"，`N` 就是 `N` 轮。`/me start -i <rounds>` 在这一次运行里覆盖它：workflow 的每个 job 都跑命令行指定的那个轮数。一轮在这个 job 的 step 跑完时结束；下一轮从这个 job 的第一个 step 开始，上一轮的 step 产出被清空，每个 step 的预算也重新开始。一轮里一个 step 都没跑的 job 不会再重复——每个 step 都被跳过的这一轮什么也没做。重复的 job 最好带一个 `wait:` step，不然一轮接一轮地跑，追着 chat 的速度。一轮也可以提前结束——这一轮真的没东西可做时由 agent 结束它：这一轮没跑的 step 记成跳过，job 的 `final: true` step 顶上，然后 job 开下一轮。
+一个 job 带 `needs`、`if`、`iterations` 和 `steps`。`iterations` 是这个 job 跑多少轮：不填就是一轮，`0` 是"一直跑到运行结束"，`N` 就是 `N` 轮。`/me start -i <rounds>` 在这一次运行里覆盖它：workflow 的每个 job 都跑命令行指定的那个轮数。一轮在这个 job 的 step 跑完时结束；下一轮从这个 job 的第一个 step 开始，上一轮的 step 产出被清空，每个 step 的预算也重新开始。一轮里一个 step 都没跑的 job 不会再重复——每个 step 都被跳过的这一轮什么也没做。重复的 job 最好带一个 `wait:` step，不然一轮接一轮地跑，追着 chat 的速度。一轮也可以提前结束——这一轮真的没东西可做时由 agent 结束它：这一轮没跑的 step 记成跳过，然后 job 开下一轮。
 
 一个 step 恰好带一种类型：
 
@@ -574,7 +574,6 @@ requires:
 | `env` | 这个 step 的命令拿到的环境变量。 |
 | `continue-on-error` | 这个 step 失败时链条是否继续。 |
 | `description` | 这一步是什么、哪个 outcome 算正常分支、异常时怎么办。决策模型和 chat 模型都读它。 |
-| `final` | 这个 step 负责收尾：这一轮怎么结束它都跑。标了 `final: true` 的 step 在提前结束的一轮里顶上被跳过的那几步。 |
 | `agents` | 这个 step 依次用哪些 agent 干活。每一项带一个 `mode` 和它适用的 `names`。 |
 
 写了 agent 的 step 按顺序一个个试，某一次坏了就换下一个。`args` 模式把 agent
@@ -596,7 +595,7 @@ agent 的预算是一个数字，对每个 step、每一轮都一样，由 `me.m
 `${{ steps.<id>.outputs.data.<key> }}`、`${{ needs.<job>.* }}`、`${{ env.NAME }}`
 和 `${{ now }}`；`outputs` 这一段可以省略。条件也可以直接写表达式——
 `if: steps.fix.outputs.status == 429`——并且可以比较读到的值：运算符有 `==`、`!=`、
-`<`、`<=`、`>`、`>=`、`&&`、`||` 和 `!`，函数有 `success()`、`always()` 和
+`<`、`<=`、`>`、`>=`、`&&`、`||` 和 `!`，函数有 `success()` 和
 `empty(x)`。表达式里出现 workflow 没声明的参数，在加载文件时就会被拒绝。
 
 ### 配置模型
@@ -722,7 +721,7 @@ agent 在每个 step 上有一个预算：一个数字，每个 step、每一轮
 
 除了每个 step 的预算之外没有别的预算：一次运行结束于计划跑完、agent 调用 `finish`，或者你发 `/me stop`，或者 daemon 关掉。chat 模型一轮没有工具调用的回答、chat 模型调用失败，都不结束运行——运行会再问一次，界限由预算给出。
 
-agent 在判断点上给出一个指令：`resume`（修好之后把坏掉的那一步再跑一遍）、`next`（跳过判断点说的那一步，让引擎继续往下走）、`ntm_<command>`（以你的身份跑一条 nightme 命令）、`agent`（问 owner 的思考为什么这一步失败）、`instruct`（给 chat 发一段自由指令）、`answer_choice`（回答 chat 在等的一个提示）、`ask_human`（问你）、`repo_status`（读分支和工作树）、`wait`（等一会儿再看——后台还有活在跑时）、`end_round`（结束当前 job 的这一轮：没跑的 step 记成跳过，job 的 final step 顶上，然后开下一轮）、`finish`（结束运行）。`resume` 和 `next` 不接 step：运行知道判断点说的是哪一步，下一步跑什么由引擎决定。运行不允许做的事会以错误回来，agent 自己纠正。
+agent 在判断点上给出一个指令：`resume`（修好之后把坏掉的那一步再跑一遍）、`next`（跳过判断点说的那一步，让引擎继续往下走）、`ntm_<command>`（以你的身份跑一条 nightme 命令）、`agent`（问 owner 的思考为什么这一步失败）、`instruct`（给 chat 发一段自由指令）、`answer_choice`（回答 chat 在等的一个提示）、`ask_human`（问你）、`repo_status`（读分支和工作树）、`wait`（等一会儿再看——后台还有活在跑时）、`end_round`（结束当前 job 的这一轮：没跑的 step 记成跳过，然后开下一轮）、`finish`（结束运行）。`resume` 和 `next` 不接 step：运行知道判断点说的是哪一步，下一步跑什么由引擎决定。运行不允许做的事会以错误回来，agent 自己纠正。
 
 ### 结果模型
 

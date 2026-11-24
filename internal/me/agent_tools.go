@@ -156,7 +156,7 @@ func (s *Service) toolCatalogue(r *run) []llm.Tool {
 		},
 		llm.Tool{
 			Name:        toolEndRound,
-			Description: "End the round of the job the run is on, because there is genuinely nothing left to do in it. The steps of the round that did not run are skipped, the job's final step runs, and the job starts its next round.",
+			Description: "End the round of the job the run is on, because there is genuinely nothing left to do in it. The steps of the round that did not run are skipped, and the job starts its next round.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 		},
 		llm.Tool{
@@ -858,8 +858,8 @@ func (s *Service) toolWait(ctx context.Context, r *run, call pendingCall) (stepR
 // toolEndRound ends the round of the job the run is on.
 //
 // It is the generic signal for "there is nothing left to do here":
-// the steps of the round that did not run are skipped, the final step
-// of the job runs, and the job starts its next round.
+// the steps of the round that did not run are skipped, and the job
+// starts its next round.
 func (s *Service) toolEndRound(ctx context.Context, r *run, _ pendingCall) (stepResult, error) {
 	job, round := r.brainIteration()
 	if job == "" {

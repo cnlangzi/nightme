@@ -149,7 +149,7 @@ func TestEvalCond_ReadsTheTruthOfAValue(t *testing.T) {
 	}
 }
 
-// TestEvalCond_ReadsTheFunctions — the three functions of the language.
+// TestEvalCond_ReadsTheFunctions — the two functions of the language.
 func TestEvalCond_ReadsTheFunctions(t *testing.T) {
 	ec := exprCtx()
 	tests := []struct {
@@ -158,7 +158,6 @@ func TestEvalCond_ReadsTheFunctions(t *testing.T) {
 	}{
 		{"success()", false},
 		{"!success()", true},
-		{"always()", true},
 		{"empty(steps.fix.outputs.data.missing)", true},
 		{"empty(steps.fix.outputs.data.issue)", false},
 		{"empty(steps.missing.outputs.status)", true},
@@ -175,6 +174,15 @@ func TestEvalCond_ReadsTheFunctions(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("%s = %v, want %v", tt.cond, got, tt.want)
 		}
+	}
+	// always() is not a function of the language: a condition that
+	// calls one does not parse.
+	_, err := EvalCond("always()", ec)
+	if err == nil {
+		t.Fatal("always() was accepted")
+	}
+	if !strings.Contains(err.Error(), `unknown function "always"`) {
+		t.Errorf("the error = %q, want it to name the function", err.Error())
 	}
 }
 

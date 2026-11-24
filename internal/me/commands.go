@@ -31,15 +31,18 @@ var excludedCommands = map[string]bool{
 //
 // They shape the project instead of moving the work on, and the run
 // has no say over the project's shape. The ones that tear the run's
-// own workspace down or move it elsewhere are off limits for the same
-// reason: the run works where it works.
+// own workspace down, rewrite what it holds or end the command it
+// waits for are off limits for the same reason: the run works on what
+// it finds, it does not reshape it.
+//
+// `/gtw back` is not among them: it is the way out of a fix worktree
+// the run is stuck in.
 var excludedSubcommands = map[string]map[string]bool{
 	"gtw": {
 		"config": true,
 		"plan":   true,
 		"new":    true,
 		"close":  true,
-		"back":   true,
 		"sync":   true,
 		"abort":  true,
 	},

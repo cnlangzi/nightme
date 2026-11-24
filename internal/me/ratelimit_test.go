@@ -354,7 +354,7 @@ func TestARateLimitedStepHoldsTheRunWithoutAWakeUp(t *testing.T) {
 	// The run waits for the operator: it did not open a decision
 	// session, and it did not ask a model what to do.
 	for _, card := range op.Cards() {
-		if strings.HasPrefix(card.Body, decisionLine) {
+		if strings.HasPrefix(card.Body, decisionMark) {
 			t.Errorf("the run opened a decision session while it was paused: %q", card.Body)
 		}
 	}

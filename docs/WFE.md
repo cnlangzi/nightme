@@ -907,7 +907,7 @@ The agent answers a judgment point with a **directive**:
 
 `resume` and `next` name no step: the run knows the one the judgment is about, and the engine decides what runs next. `resume` runs that step again — its budget for the round is checked first — and `next` records it as skipped: the facts the step produced are kept, the error goes, and the engine plans the next step. Both refuse a step that did its job already: there is nothing to repair, and nothing to skip. `next` refuses a step that is still running: the work is in flight.
 
-The nightme commands are the ones the command registry holds, minus the ones that would take the run with them (`/me`, `/close`, `/new`, `/stop`, `/cwd`, `/use`, `/resume`, `/steer`, `/wiki`), the ones that only show something (`/help`, `/think`, `/tools`, `/watch`, `/format`) and the subcommands that shape the project or tear the run's own workspace down instead of moving the work on (`/gtw config`, `/gtw plan`, `/gtw new`, `/gtw close`, `/gtw back`, `/gtw sync`, `/gtw abort`). A command that belongs to no step is a repair: it counts against the step the run is on, but it never becomes that step's verdict.
+The nightme commands are the ones the command registry holds, minus the ones that would take the run with them (`/me`, `/close`, `/new`, `/stop`, `/cwd`, `/use`, `/resume`, `/steer`, `/wiki`), the ones that only show something (`/help`, `/think`, `/tools`, `/watch`, `/format`) and the subcommands that shape the project (`/gtw config`, `/gtw plan`, `/gtw new`) or tear the run's own workspace and its command apart (`/gtw close`, `/gtw sync`, `/gtw abort`). `/gtw back` is among the commands the model may issue: it is the way out of a fix worktree the run is stuck in. A command that belongs to no step is a repair: it counts against the step the run is on, but it never becomes that step's verdict.
 
 The engine owns the run state: after a directive is executed, the state holds the new outcome, the step that ran and the round it ran in. A decision the agent makes never writes state by itself.
 
@@ -1287,10 +1287,12 @@ rounds: 4
 ```
 
 The card of a decision shows that the agent took the workflow over, why the
-decision was taken, what the models decided and what the chat model said:
+decision was taken, what the models decided and what the chat model said. Its
+first line is the takeover: the agent's mark, in bold, so that the takeover is
+seen at once among the entries of the card.
 
 ```
-NightMe is taking over the workflow · review
+**🧑‍💻: NightMe is taking over the workflow · review**
 
 reason: the previous step "review" ended as "failed" — the review is incomplete
 

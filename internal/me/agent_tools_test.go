@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -240,6 +241,45 @@ func TestCommandTools_TheSubcommandsAreAnEnum(t *testing.T) {
 	}
 	if _, ok := schema.Properties["args"]; !ok {
 		t.Errorf("the schema has no args: %s", tool.Schema)
+	}
+}
+
+// TestCommandTools_GtwBackIsATool — a run that is stuck inside a fix
+// worktree has one way out: `/gtw back`. The model has to be able to
+// call it, while the subcommands that shape the project stay out.
+func TestCommandTools_GtwBackIsATool(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+
+	r := testRunWith(t, svc, "one", []CommandInfo{
+		{Name: "gtw", Summary: "the git workflow", Subcommands: []CommandInfo{
+			{Name: "fix"}, {Name: "back"}, {Name: "commit"},
+			{Name: "config"}, {Name: "plan"}, {Name: "new"},
+			{Name: "close"}, {Name: "sync"}, {Name: "abort"},
+		}},
+	}, "")
+
+	tool, ok := toolNamed(svc.toolCatalogue(r), "ntm_gtw")
+	if !ok {
+		t.Fatal("the gtw command has no tool")
+	}
+	var schema struct {
+		Properties map[string]struct {
+			Enum []string `json:"enum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(tool.Schema, &schema); err != nil {
+		t.Fatalf("the schema is not JSON: %v", err)
+	}
+	enum := schema.Properties["subcommand"].Enum
+	if !slices.Contains(enum, "back") {
+		t.Errorf("the subcommand enum is %v, want it to carry back", enum)
+	}
+	for _, name := range []string{"config", "plan", "new", "close", "sync", "abort"} {
+		if slices.Contains(enum, name) {
+			t.Errorf("the subcommand enum carries the excluded %q: %v", name, enum)
+		}
 	}
 }
 

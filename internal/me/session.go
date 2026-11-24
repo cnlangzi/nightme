@@ -101,6 +101,12 @@ type session struct {
 // decision onto the card of that entry.
 const decisionLine = "NightMe is taking over the workflow"
 
+// decisionMark opens the takeover line.
+//
+// The takeover has to be seen at once among the entries of the card:
+// the mark of the agent, and the bold a markdown entry renders in.
+const decisionMark = "**" + BotMark
+
 // stateLine is what the placeholder of the state of the run says.
 //
 // A placeholder says in one line what the card below it is about.
@@ -321,10 +327,11 @@ func (s *Service) openDecisionSession(ctx context.Context, r *run) {
 // The line names the step the agent takes over: the card is read on
 // its own, and the step says what the decision is about.
 func decisionTakeover(stepID string) string {
-	if stepID == "" {
-		return decisionLine
+	line := decisionLine
+	if stepID != "" {
+		line += " · " + stepID
 	}
-	return decisionLine + " · " + stepID
+	return decisionMark + line + "**"
 }
 
 // publishReason publishes why the decision was taken.

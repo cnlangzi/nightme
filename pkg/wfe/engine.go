@@ -292,8 +292,8 @@ func startRound(state *RunState, wf *Workflow, name string) {
 // roundEnded reports whether the step is the one whose failure ended
 // the round of its job.
 //
-// The agent ended the round: the plan goes on with the final step of
-// the job or with the next round, not with a judgment point.
+// The agent ended the round: the plan goes on with the next round of
+// the job, not with a judgment point.
 func roundEnded(state *RunState, prev StepState) bool {
 	if prev.Job == "" || prev.ID == "" {
 		return false
@@ -309,9 +309,8 @@ func roundEnded(state *RunState, prev StepState) bool {
 //
 // It is what the agent does when there is nothing left to do in this
 // round: the steps of the round that did not run are recorded as
-// skipped — the final step of the job excepted, for it runs in their
-// place — and the round is marked as ended. The plan goes on with the
-// final step of the job, or with its next round when it has none.
+// skipped, and the round is marked as ended. The plan goes on with the
+// next round of the job.
 //
 // The engine owns the state: this is the only way a round ends early.
 func EndRound(state *RunState, wf *Workflow, job string) error {
@@ -359,11 +358,6 @@ func endRound(state *RunState, wf *Workflow, job, ending string) error {
 		if step.ID == ending {
 			// The step that ends the round is not among the steps it
 			// cuts short.
-			continue
-		}
-		if step.Final {
-			// The final step runs in place of the steps the round
-			// cut short.
 			continue
 		}
 		RecordStep(state, job, step, outcome.Outcome{

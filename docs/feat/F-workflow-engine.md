@@ -101,7 +101,6 @@ type Step struct {
     Env             map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
     ContinueOnError bool              `yaml:"continue-on-error,omitempty" json:"continue-on-error,omitempty"`
     Note            string            `yaml:"note,omitempty" json:"note,omitempty"`
-    Final           bool              `yaml:"final,omitempty" json:"final,omitempty"`
 
     // 四选一
     Message string         `yaml:"message,omitempty" json:"message,omitempty"`
@@ -118,7 +117,7 @@ type Step struct {
 
 `Step` 有**五种** kind：`message` / `shell` / `use` / `wait` / `cmd`。`Step.Kind()`（`types.go`）先看 `Cmd` 是不是有值——有就是 `StepKindCmd`；否则按 Message → Shell → Use → Wait 的顺序判定，五种都没写就是 `StepKindNone`。
 
-`Job.Iterations` 是这个 job 跑几轮：缺省 1，0 表示一直跑到 run 结束，N 就是 N 轮。`Job.Sleep` 是两轮之间的间隔。`Step.Final` 标记收尾 step——它在这一轮怎么结束都会跑。
+`Job.Iterations` 是这个 job 跑几轮：缺省 1，0 表示一直跑到 run 结束，N 就是 N 轮。`Job.Sleep` 是两轮之间的间隔。
 
 `RunState` 是 run 的进度：
 
@@ -206,7 +205,7 @@ func IsPending(state *RunState, stepID string) bool
 
 `ReadySet` 是 run 下一步可以跑的 step：job 的 `needs` 都满足、`if:` 成立、且还没跑过。同一个 job 里只有第一个这样的 step算数——job 的 step 是顺序的。`ReadySet` 不推进轮次，也不记录被跳过的 step；`Decide` 才做这两件事。
 
-`EndRound` 是提前结束一轮的**唯一**入口：这一轮没跑的 step 记为 skipped（`final:` 的 step 除外——它顶替它们跑），并把这一轮标记为已结束。plan 接着走那个 final step，没有 final step 就走下一轮。还在跑的 step 会让 `EndRound` 报错——一个没落定的命令下面不能收摊。
+`EndRound` 是提前结束一轮的**唯一**入口：这一轮没跑的 step 记为 skipped，并把这一轮标记为已结束。plan 接着走下一轮。还在跑的 step 会让 `EndRound` 报错——一个没落定的命令下面不能收摊。
 
 ### 3.6 表达式（`expr_parse.go` / `expr_eval.go` / `expr.go`）
 
@@ -241,7 +240,6 @@ func EvalCond(cond string, ec ExprCtx) (bool, error)
 | `args.X` | `ec.Args["X"]` |
 | `now` | `ec.Now` 的 RFC 3339 写法 |
 | `success()` | 最后一个跑过的 step 的裁决；还没跑过 step 时为真 |
-| `always()` | `true` |
 | `empty(X)` | `X` 是 null，或是去空白后为空的字符串 |
 
 运算符从低到高：`||` → `&&` → `==` / `=` / `!=` → `<` / `<=` / `>` / `>=` → `!`。`!` 比比较紧，所以 `!a == b` 是 `(!a) == b`。

@@ -182,7 +182,6 @@ jobs:
           FOO: bar
         continue-on-error: true
         description: what the step is for
-        final: false
         message: hi
       - id: two
         shell: echo
@@ -619,6 +618,27 @@ jobs:
 	}
 }
 
+// TestValidate_TheRetiredFinalIsAnUnknownKey — a step used to name
+// the step that cleans up after the round; the key is not read any
+// more.
+func TestValidate_TheRetiredFinalIsAnUnknownKey(t *testing.T) {
+	diags := Validate([]byte(`
+title: x
+jobs:
+  main:
+    steps:
+      - id: one
+        message: hi
+        final: true
+`))
+	if len(diags) != 1 {
+		t.Fatalf("diagnostics = %v, want one", diags)
+	}
+	if !strings.Contains(diags[0].Message, `unknown key "final"`) {
+		t.Errorf("the diagnostic = %q, want the unknown key", diags[0].Message)
+	}
+}
+
 // TestValidate_AnEmptyRequiresNamesNoRequirement — an empty block is
 // the same as not writing it.
 func TestValidate_AnEmptyRequiresNamesNoRequirement(t *testing.T) {
@@ -704,9 +724,9 @@ jobs:
 }
 
 // TestValidate_TheFunctionsOfTheLanguageAreKnown — the language has
-// three functions, and the others are refused.
+// two functions, and the others are refused.
 func TestValidate_TheFunctionsOfTheLanguageAreKnown(t *testing.T) {
-	for _, cond := range []string{"success()", "always()", "empty(steps.one.outputs.status)"} {
+	for _, cond := range []string{"success()", "empty(steps.one.outputs.status)"} {
 		diags := Validate([]byte(`
 title: x
 jobs:
@@ -720,7 +740,7 @@ jobs:
 			t.Errorf("%s was refused: %v", cond, diags)
 		}
 	}
-	for _, cond := range []string{"failure()", "cancelled()"} {
+	for _, cond := range []string{"failure()", "cancelled()", "always()"} {
 		diags := Validate([]byte(`
 title: x
 jobs:

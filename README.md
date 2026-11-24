@@ -651,8 +651,7 @@ had nothing to do. A repeating job wants a
 `wait:` step, so its rounds do not follow each other as fast as the chat
 answers. A round can also end early — the agent ends it when there is
 genuinely nothing left to do in it. The steps of the round that did not run are
-skipped, the job's `final: true` step runs in their place, and the job starts
-its next round.
+skipped, and the job starts its next round.
 
 A step carries exactly one kind:
 
@@ -670,7 +669,6 @@ A step carries exactly one kind:
 | `env` | The environment the step's command gets. |
 | `continue-on-error` | Whether the chain continues when the step fails. |
 | `description` | What the step is, which outcome is its normal branch, and what to do when it is not. The decision model and the chat model both read it. |
-| `final` | The step cleans up after the round: it runs when the round ends, however the round ends. A step marked `final: true` runs in the place of the steps a round that ended early cut short. |
 | `agents` | The agents the step runs, in order. Each entry has a `mode` and the `names` it applies to. |
 
 A step that names agents runs them in order and falls through to the next one
@@ -695,7 +693,7 @@ The expressions are `${{ args.NAME }}`, `${{ steps.<id>.outputs.status }}`,
 and `${{ now }}`. The `outputs` segment is optional. A condition may also be
 written bare — `if: steps.fix.outputs.status == 429` — and it may compare
 what it reads: `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||` and `!` are there,
-and the functions are `success()`, `always()` and `empty(x)`. An expression
+and the functions are `success()` and `empty(x)`. An expression
 that names an argument the workflow does not declare is refused when the file
 is loaded.
 
@@ -916,11 +914,10 @@ free-form instruction to the chat), `answer_choice` (answer a prompt the work
 agent is waiting for), `ask_human` (ask you), `repo_status` (read the branch and
 the tree), `wait` (wait before it looks again, for work that is still running in
 the background), `end_round` (end the round of the job the run is on — the steps
-of the round that did not run are skipped, the job's final step runs and the job
-starts its next round), or `finish` (end the run). `resume` and `next` name no
-step: the run knows the one the judgment is about, and the engine decides what
-runs next. Anything the run is not allowed to do comes back as an error it can
-correct.
+of the round that did not run are skipped and the job starts its next round), or
+`finish` (end the run). `resume` and `next` name no step: the run knows the one
+the judgment is about, and the engine decides what runs next. Anything the run
+is not allowed to do comes back as an error it can correct.
 
 ### The outcome model
 

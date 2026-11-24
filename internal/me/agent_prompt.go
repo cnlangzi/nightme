@@ -24,7 +24,7 @@ func (s *Service) systemPrompt(r *run) string {
 
 	b.WriteString("## The workflow\n")
 	b.WriteString("The title is the objective. The steps are the owner's procedure for reaching it; each step carries a description: what the step is, which outcome is its normal branch and what to do when it is not. A step's description is the owner's instruction for that step. The description wins over the ready set and over your own judgment. Follow their order. The nightme commands are yours to run as fixes, but only a step's own run moves the work on.\n")
-	b.WriteString("A step that waits sits out a duration. A wait belongs at the start of a round: it is how a repeating job backs off when there is nothing to do. A step marked as the final step cleans up after the round: it runs when the round ends, however the round ends.\n\n")
+	b.WriteString("A step that waits sits out a duration. A wait belongs at the start of a round: it is how a repeating job backs off when there is nothing to do.\n\n")
 
 	b.WriteString("## Your tools\n")
 	b.WriteString("- resume() runs the step that broke again, after you repaired the gap.\n")
@@ -38,7 +38,7 @@ func (s *Service) systemPrompt(r *run) string {
 	}
 	b.WriteString("- repo_status reads the branch and the working tree. answer_choice answers a prompt a running command is waiting for.\n")
 	b.WriteString("- wait(duration) waits before you look again — for work that is still running in the background.\n")
-	b.WriteString("- end_round ends the round of the job the run is on: the steps of the round that did not run are skipped, the job's final step runs, and the job starts its next round.\n")
+	b.WriteString("- end_round ends the round of the job the run is on: the steps of the round that did not run are skipped, and the job starts its next round.\n")
 	if !r.workflow.Instruct {
 		b.WriteString("\nThis workflow does not allow instructions; fix things with nightme commands.\n")
 	}

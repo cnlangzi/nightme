@@ -181,9 +181,6 @@ type Step struct {
 	Env             map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 	ContinueOnError bool              `yaml:"continue-on-error,omitempty" json:"continue-on-error,omitempty"`
 	Description     string            `yaml:"description,omitempty" json:"description,omitempty"`
-	// Final marks the step that cleans up after the round. It runs
-	// when the round ends, however the round ends.
-	Final bool `yaml:"final,omitempty" json:"final,omitempty"`
 
 	// Message is the text sent to the chat.
 	Message string `yaml:"message,omitempty" json:"message,omitempty"`
@@ -323,8 +320,8 @@ type RunState struct {
 	// started yet is not in the map.
 	Rounds map[string]int `json:"rounds,omitempty"`
 	// EndedRounds holds the early end of a round, keyed by the job.
-	// The plan goes on with the final step of such a job or with its
-	// next round — not with a judgment point.
+	// The plan goes on with the next round of such a job — not with a
+	// judgment point.
 	EndedRounds map[string]EndedRound `json:"ended_rounds,omitempty"`
 	// SkippedRounds holds the rounds that ended quietly. Such a round
 	// leaves nothing behind in the run's report: no row, no error and

@@ -168,7 +168,7 @@ func TestDecide_TheJudgmentReasonNamesWhatBroke(t *testing.T) {
 // the agent ended early is not a judgment point: the agent has already
 // decided what happens next.
 func TestDecide_AnExceptionTheAgentResolvedIsNotAJudgmentPoint(t *testing.T) {
-	wf := mustParse(t, finalStepYAML)
+	wf := mustParse(t, earlyEndYAML)
 	state := newRunState(wf)
 	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{
 		Success:    false,
@@ -187,7 +187,7 @@ func TestDecide_AnExceptionTheAgentResolvedIsNotAJudgmentPoint(t *testing.T) {
 	if decision.Kind != DecisionRun {
 		t.Fatalf("Kind = %v, want a run (the reason was %q)", decision.Kind, decision.Reason)
 	}
-	if decision.Step.ID != "cleanup" {
-		t.Errorf("Step.ID = %q, want cleanup", decision.Step.ID)
+	if decision.Step.ID != "one" {
+		t.Errorf("Step.ID = %q, want one — the job starts its next round", decision.Step.ID)
 	}
 }

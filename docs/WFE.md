@@ -35,7 +35,6 @@ The personal agent (`/me`) runs a workflow in a chat. The same file is the plan 
   - [5.5 `cmd` — run a builtin command](#55-cmd--run-a-builtin-command)
   - [5.6 Common step fields](#56-common-step-fields)
   - [5.7 `agents` — the chain of agents the step runs](#57-agents--the-chain-of-agents-the-step-runs)
-  - [5.8 `final` — the step that cleans up after the round](#58-final--the-step-that-cleans-up-after-the-round)
 - [6. Expressions](#6-expressions)
   - [6.1 The forms of an expression](#61-the-forms-of-an-expression)
   - [6.2 The paths](#62-the-paths)
@@ -228,7 +227,6 @@ jobs:
 
       # 5. use step: invoke a registered action
       - id: notify
-        if: ${{ always() }}
         use: notify
         with:
           channel: feishu
@@ -237,7 +235,6 @@ jobs:
 
       # 6. use step: user-defined action script
       - id: cleanup
-        if: ${{ always() }}
         use: cleanup-tmp-files
         with:
           paths: [/tmp/pr]
@@ -403,7 +400,7 @@ The gap is not a step: it shows up nowhere in the chat and nowhere on the card o
 
 A round in which no step ran does not repeat: a job whose every step is skipped had nothing to do, so it does not start another round. The plan is exhausted and the agent decides whether the run is over.
 
-A round can also end **early**: the agent ends it when there is genuinely nothing left to do in it. The steps of the round that did not run are recorded as skipped, the job's final step (see §5.8) runs in their place, and the job starts its next round. A job that names no final step just starts its next round.
+A round can also end **early**: the agent ends it when there is genuinely nothing left to do in it. The steps of the round that did not run are recorded as skipped, and the job starts its next round.
 
 A job waits for the jobs it `needs` — a repeating needed job releases the waiting job after its first round, because a job that repeats until the run ends never finishes.
 
@@ -563,7 +560,6 @@ Every step supports:
 | `env` | map | — | Environment variables for the step (merged on top of the run's env and the daemon's env). |
 | `continue-on-error` | bool | `false` | Whether the chain continues when this step fails. |
 | `description` | string | — | What the step is, which outcome is its normal branch, and what to do when it is not. The decision model and the chat model both read it. |
-| `final` | bool | `false` | The step cleans up after the round. It runs when the round ends, however the round ends. |
 | `agents` | chain[] | — | The agents the step runs, in order (see §5.7). |
 
 ### 5.7 `agents` — the chain of agents the step runs
@@ -622,28 +618,6 @@ The `use` mode has no handover: the message goes to the chat as it is, and there
 A workflow that names no `agents` sends its message once, unchanged.
 
 One execution of the step is one run of it: when it concludes, it is recorded in the run's action history once, and it costs one chance of the step's budget however many agents its chain tried. The record carries the command of the attempt the chain ended on — the `args` attempt's own command (`/review -a omp`, or `/review --continue -a omp` when it took the work of the attempt before it over), or the step's message with the agent noted (`/review [agent: omp]`) in the `use` mode, because the command itself does not name the agent — and the outcome of the chain. An attempt the chain absorbed is not recorded: the operator reads the result of the chain, not the failures it swallowed.
-
-### 5.8 `final` — the step that cleans up after the round
-
-```yaml
-jobs:
-  ship:
-    iterations: 0                     # the job repeats until the run ends
-    steps:
-      - id: fix
-        message: "/gtw fix ${{ args.issue }} -y"
-      - id: cleanup
-        message: "/gtw close"
-        final: true
-```
-
-A final step is normally the last step of its job. It runs in the ordinary order when the round completes. When the round ends early — the agent ends it because there is genuinely nothing left to do — the final step runs in place of the steps the round cut short, and the job starts its next round.
-
-A wait at the *end* of the round is one of the steps the early end cuts short — mark it `final: true` if it is the back-off you want. The gap between two rounds needs no such care: it is the job's `sleep` (see §4), and the engine keeps it however the round ended.
-
-The author says which step cleans up, so no existing workflow changes meaning: a workflow without a `final: true` step behaves exactly as before.
-
-A final step is a step like any other: when it fails, the agent is asked again.
 
 ---
 
@@ -722,10 +696,9 @@ A condition holds when the value it comes to is true. A null is false, a bool is
 | Function | Answers |
 |---|---|
 | `success()` | Whether the last step that ran did its job. A run that ran no step yet has nothing that broke: the answer is true. |
-| `always()` | Always true. |
 | `empty(x)` | Whether `x` is nothing: null, or a string with nothing but spaces in it. |
 
-`failure()` and `cancelled()` are not functions of the language, and a condition that calls one is refused when the file is loaded. Write `!success()` and `steps.<id>.outputs.status == 499` instead.
+`failure()`, `cancelled()` and `always()` are not functions of the language, and a condition that calls one is refused when the file is loaded. Write `!success()` and `steps.<id>.outputs.status == 499` instead; a step that must run whatever happens carries no condition at all.
 
 ### 6.6 What is refused
 
@@ -767,12 +740,11 @@ jobs:
         if: ${{ steps.fix.outputs.data.issue }}
       - id: close
         message: "/gtw close"
-        final: true
 ```
 
-The guard on the steps after `fix` reads `data.issue`: a fix that picked an issue reports `issue` in its outcome, a fix that found nothing does not — so the guard means "an issue was picked" and the rest of the round is skipped.
+The guard on the steps after `fix` reads `data.issue`: a fix that picked an issue reports `issue` in its outcome, a fix that found nothing does not — so the guard means "an issue was picked" and the guarded steps of the round are skipped.
 
-The `close` step is the final step: it runs however the round ends. When the queue was empty, the agent ends the round instead of walking past the work that was never done, and `close` still tidies up the worktree the previous round left behind.
+The `close` step carries no condition: it runs when the round reaches it, and it tidies up the worktree the round left behind.
 
 The `sleep` is the gap between two rounds: the round that ends early is followed by five minutes of nothing, and the next round looks at the queue again.
 
@@ -904,7 +876,7 @@ A run that has not executed anything yet counts as a normal result, so the first
 
 A round ends when the job's steps are done. The next round starts with the job's first step, the round's step outputs are cleared and the per-step budgets start over. The ready set of the next round is computed from the state of that round. A job that names a `sleep` waits its gap before that first step runs.
 
-A round can also end early, when the agent ends it: the steps of the round that did not run are recorded as skipped, the job's final step runs in their place, and the round advances as it does after an ordinary round. The step whose exception the agent resolved is not a judgment point any more — the agent has already decided what happens next.
+A round can also end early, when the agent ends it: the steps of the round that did not run are recorded as skipped, and the round advances as it does after an ordinary round. The step whose exception the agent resolved is not a judgment point any more — the agent has already decided what happens next.
 
 ### 8.3 The judgment points
 
@@ -930,7 +902,7 @@ The agent answers a judgment point with a **directive**:
 | `ask_human(question)` | Asks the user. The run waits for the answer. |
 | `repo_status()` | Reads the branch and the tree facts of the chat. |
 | `wait(duration)` | Waits before the model looks again — for work that is still running in the background. The duration is a Go duration (`30s`, `5m`); the wait lasts at most 10 minutes. |
-| `end_round()` | Ends the round of the job the run is on: the steps of the round that did not run are skipped, the job's final step runs, and the job starts its next round. |
+| `end_round()` | Ends the round of the job the run is on: the steps of the round that did not run are skipped, and the job starts its next round. |
 | `finish(status, summary)` | Ends the run. `status` is `done` or `failed`. |
 
 `resume` and `next` name no step: the run knows the one the judgment is about, and the engine decides what runs next. `resume` runs that step again — its budget for the round is checked first — and `next` records it as skipped: the facts the step produced are kept, the error goes, and the engine plans the next step. Both refuse a step that did its job already: there is nothing to repair, and nothing to skip. `next` refuses a step that is still running: the work is in flight.
@@ -978,7 +950,7 @@ The chat model acts through the tools below. Every handler enforces the policy: 
 | `ask_human(question)` | Asks the question in the chat — as a reply to the run's overview — and waits. The answer resumes the run as the tool's result. |
 | `repo_status()` | Reads the chat's repository: the branch, whether the tree is dirty, and how far the branch is ahead of or behind its upstream and its base branch. |
 | `wait(duration)` | Blocks the agent's turn for the duration, at most 10 minutes, and hands the turn back to the model when it is over. The wait belongs to the run: stopping the run or shutting the daemon ends it at once. |
-| `end_round()` | Ends the round of the job the run is on: the steps of the round that did not run are recorded as skipped, the job's final step runs in their place, and the job starts its next round. A round whose step is still running cannot end. |
+| `end_round()` | Ends the round of the job the run is on: the steps of the round that did not run are recorded as skipped, and the job starts its next round. A round whose step is still running cannot end. |
 | `finish(status, summary)` | Runs `Policy.CheckFinish` and ends the run. The record of the session is posted when the run ends. `status` is `done` or `failed`. |
 
 A free-form text that names a nightme command is refused: the command has a tool of its own, and a command in a free-form text would run as a turn of the chat instead of as a command of the run.

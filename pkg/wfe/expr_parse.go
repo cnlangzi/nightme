@@ -284,7 +284,6 @@ func (n *binaryNode) exprNode()  {}
 // status, and everything else is a path and an operator.
 var exprFunctions = map[string]int{
 	"success": 0,
-	"always":  0,
 	"empty":   1,
 }
 

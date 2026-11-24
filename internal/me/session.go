@@ -202,10 +202,14 @@ func (s *Service) showState(ctx context.Context, r *run) {
 // showStateOnPause publishes the state of the run when it stops by
 // itself.
 //
-// The card of the decision is on the screen when the agent has taken
-// over: the run stops on the card of the step it is on, and a card of
-// its own would say the same thing twice. The round keeps the card it
-// has.
+// A card of the decision is open: the run stops on the card of the
+// step it was judged at, and a card of its own would say the same
+// thing twice. The round keeps the card it has.
+//
+// The card of a decision stays open until the run judges another step,
+// so a pause that comes later publishes no state card either. The
+// operator asks for the state with `/me status` whenever they want it:
+// that answer lands on the card of their own command.
 func (s *Service) showStateOnPause(ctx context.Context, r *run) {
 	if r.decisionSessionRef() != nil {
 		return
@@ -275,11 +279,14 @@ func (s *Service) publishState(ctx context.Context, r *run, sess *session, it it
 // openDecisionSession opens the session of a decision.
 //
 // The card of a decision belongs to the step the decision is about: a
-// step that is judged again goes on with the card it has, so the
-// operator reads one card per step instead of one card per judgment.
+// step that is judged again in a row goes on with the card it has. A
+// judgment about another step ends that card — the verdict rides in
+// its footer — and a step the run comes back to opens a card of its
+// own: one card belongs to one stretch of judgments.
 //
-// A decision about another step ends the card of the step before: its
-// verdict rides in its own footer.
+// The step is the one the run is on (budgetStep): a judgment that
+// names no step falls back to the step the plan may run now, and then
+// to the step that ran last.
 //
 // The card is opened by the line that says the agent takes the
 // workflow over. The line goes out without an anchor, the chat answers

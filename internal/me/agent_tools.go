@@ -963,8 +963,6 @@ func (s *Service) pauseForRateLimit(ctx context.Context, r *run, res stepResult)
 		return
 	}
 	r.requestPause(rateLimitReason)
-	// The run stops: it publishes the state of the round on a card of
-	// its own.
 	s.showStateOnPause(ctx, r)
 	s.announcePause(ctx, r, rateLimitReason)
 }

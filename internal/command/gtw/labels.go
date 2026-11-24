@@ -145,9 +145,9 @@ func isNightmeLabel(label string) bool {
 //
 // The claim wins when several state labels are present: an issue
 // carrying `nightme/wip` is held by a fix right now, whatever else
-// it carries, and the claim has its own remedy — the worktree and
-// the label go with `/gtw close`, the label with `/gtw pr --ready`
-// or with a manual removal on the issue page.
+// it carries, and the claim has its own remedy — the worktree goes
+// with `/gtw close`, the label with `/gtw pr --ready` or with a
+// manual removal on the issue page.
 func heldLabel(issue *Issue) string {
 	if issue == nil {
 		return ""

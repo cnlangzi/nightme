@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -328,7 +329,7 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw fix * [-y|--yes]              pick the next assigned issue and fix it\n" +
 			"/gtw fix --name <branch>            create a local worktree (no issue)\n" +
 			"/gtw assign <issue-id> [--remove|-r] attach or remove the `nightme/assigned` queue marker\n" +
-			"/gtw close [--reset]                finalize the issue labels, tear down the worktree, and sync main\n" +
+			"/gtw close [--done]                 tear down the worktree, delete the branch, and sync main; --done also finalises the issue labels\n" +
 			"/gtw back                           exit the fix worktree (cwd → repoRoot) and sync main — worktree preserved\n" +
 			"/gtw back <branch>                  enter the worktree whose branch starts with <branch> (cwd → worktree); repairs a missing .nightme/gtw.yml\n" +
 			"/gtw commit [-a <agent>]            commit uncommitted work via the configured agent (no push)\n" +
@@ -364,7 +365,7 @@ func (f *Factory) Spec() command.Spec {
 				Summary: "attach the `nightme/assigned` queue marker to an issue, or take it off again",
 				Usage:   assignCmdSpec.Usage,
 			},
-			{Name: "close", Summary: "finalize the issue labels, tear down the worktree, delete the branch, and sync main", Usage: closeCmdSpec.Usage},
+			{Name: "close", Summary: "tear down the worktree, delete the branch, and sync main; --done also finalises the issue labels", Usage: closeCmdSpec.Usage},
 			{Name: "back", Summary: "exit the fix worktree (cwd → repoRoot) and sync main; `/gtw back <branch>` jumps into the worktree of that branch", Usage: "/gtw back [<branch>]"},
 			{Name: "commit", Summary: "commit uncommitted work via the configured agent", Usage: commitCmdSpec.Usage},
 			{Name: "push", Summary: "push the worktree branch (clean only — refuses dirty)"},
@@ -860,17 +861,20 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 
 // closeCmdSpec is the argv grammar for /gtw close.
 //
-// `--reset` clears the issue's `nightme/*` state labels without
-// marking the work done: the default close puts `nightme/done` on the
-// issue, `--reset` only takes the state labels off.
+// `--done` moves the tracker: the issue's `nightme/*` state labels
+// come off, `nightme/done` goes on, and the pull request the branch
+// opened loses its `nightme/*` labels. Without the flag the close is
+// a purely local teardown — the tracker is left exactly as it was,
+// because ending the local session says nothing about the work being
+// finished.
 //
-// The flag is boolean — it takes no value — so `--reset` alone is the
+// The flag is boolean — it takes no value — so `--done` alone is the
 // whole argument.
 var closeCmdSpec = command.CmdSpec{
 	Name:  "/gtw close",
-	Usage: "/gtw close [--reset]",
+	Usage: "/gtw close [--done]",
 	Flags: map[string]command.FlagSpec{
-		"--reset": {Name: "reset"},
+		"--done": {Name: "done"},
 	},
 	MinArgs: 0,
 	MaxArgs: 0,
@@ -884,28 +888,42 @@ var closeCmdSpec = command.CmdSpec{
 // See wip/gtw.md §14.5 for the full flow and RunClose for the
 // implementation.
 //
-// One flag: `--reset` clears the issue's state labels instead of
-// marking the work done. Close is otherwise intentionally
-// all-or-nothing — if the worktree is dirty the user must commit /
-// stash / discard before re-running; we don't expose a
-// force-escape hatch. Neither /gtw close nor /gtw fix exposes a
-// --force: stale worktree paths are cleaned manually via
-// `git worktree remove --force <path>` or by re-running
+// One flag: `--done` marks the work finished on the tracker. Without
+// it the close touches no label at all — it ends the local session
+// (worktree, branch, cwd) and leaves the issue's state to the human.
+// Close is otherwise intentionally all-or-nothing — if the worktree
+// is dirty the user must commit / stash / discard before re-running;
+// we don't expose a force-escape hatch. Neither /gtw close nor
+// /gtw fix exposes a --force: stale worktree paths are cleaned
+// manually via `git worktree remove --force <path>` or by re-running
 // `/gtw close` after the user has unblocked the worktree.
 //
-// The close also finalises the pull request the branch opened: its
-// `nightme/*` state labels come off, so the tracker shows the work
-// as finished on both sides. That step only warns when it fails —
-// the PR's labels are bookkeeping, and the teardown must not wait
-// for them.
+// With `--done` the close also finalises the pull request the branch
+// opened: its `nightme/*` state labels come off, so the tracker shows
+// the work as finished on both sides. That step only warns when it
+// fails — the PR's labels are bookkeeping, and the teardown must not
+// wait for them.
 //
 // No shim is needed; RunClose reads its state from the
 // cwd-scoped yml directly. Deps are forwarded verbatim; the
 // reply path is RunClose's own cs.Emitter() (no extra wiring).
 // Wrapped in withHooks so close.before / close.after fire.
 func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	// `--reset` used to clear the issue's state labels without
+	// marking the work done. The default close no longer touches the
+	// tracker at all, so the flag has no counterpart left — naming
+	// `--done` says what to write instead, which the lexer's
+	// "unknown flag" does not.
+	if slices.Contains(input.Args[2:], "--reset") {
+		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
+		return &command.SlashOutput{
+			Reply: "❌ `/gtw close --reset` no longer exists — the default `/gtw close` leaves " +
+				"the issue's labels alone; use `/gtw close --done` to mark the work done",
+			Consumed: true,
+		}, nil
+	}
 	// Issue #291: /gtw close takes no positional args, so anything
-	// in the tail that is not `--reset` is a user mistake — most
+	// in the tail that is not `--done` is a user mistake — most
 	// importantly `/gtw close --force`, which the F-XX removal
 	// note explicitly tells users not to expect. Before this gate
 	// the token was silently swallowed and the close ran anyway, so
@@ -918,7 +936,7 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *c
 			Consumed: true,
 		}, nil
 	}
-	reset := parsed.Bool("reset")
+	done := parsed.Bool("done")
 
 	cfg, loadNotes := Load()
 
@@ -927,7 +945,7 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *c
 	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
 		loadNotes, hcFn, cfg.Close.Hooks.Before, cfg.Close.Hooks.After,
 		func() error {
-			res, e := RunClose(ctx, cs, f.deps, input.ChatID, input.MessageID, reset)
+			res, e := RunClose(ctx, cs, f.deps, input.ChatID, input.MessageID, done)
 			_ = res // RunClose already sent the reply via cs.Emitter()
 			// RunClose tears down the worktree + branch +
 			// .nightme/gtw.yml and resets cs.SelectedCwd

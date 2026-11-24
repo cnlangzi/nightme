@@ -433,6 +433,23 @@ legacy case"兜底。
 
 ### 4.1 Format 1(close)
 
+不带 `--done` 的 close 是纯本地拆除,tracker 一个标签都不动:
+
+```
+✅ closed `fix-gtw-hooks`
+→ worktree: /Users/.../fix-gtw-hooks (removed)
+→ branch: fix-gtw-hooks (deleted)
+→ .nightme/gtw.yml (removed with worktree)
+→ cwd → /Users/.../nightme
+→ issue: cnlangzi/nightme#42 (labels left alone — clear them by hand if the claim is stale)
+```
+
+`→ issue:` 这一行说明 issue 的标签没被动过:owner/repo 和 issue 号取自
+yml 快照,不发远程调用;快照里没有 repo 名时只写 issue 号。本地
+fix(`/gtw fix --name <branch>`)没有 issue,不带这一行。
+
+带 `--done` 的 close 收尾 tracker,卡片多两行:
+
 ```
 ✅ closed `fix-gtw-hooks`
 → worktree: /Users/.../fix-gtw-hooks (removed)
@@ -443,14 +460,13 @@ legacy case"兜底。
 → pr: cnlangzi/nightme#7 -nightme/ready
 ```
 
-`→ issue:` 这一行只在 close 动过 issue 时出现:每个摘掉的 label 一个 `-`,
-每个贴上的一个 `+`;issue 上本来就没有 `nightme/*` label 时写
-`no nightme/* labels`。本地 fix(`/gtw fix --name <branch>`)没有 issue,
-不带这一行。`/gtw close --reset` 只摘不贴,所以只有 `-`。
+`--done` 的 `→ issue:` 行是 tracker 的账:每个摘掉的 label 一个 `-`,每个贴上
+的一个 `+`。issue 不存在时(本地 fix)不带这一行。
 
 `→ pr:` 这一行是 PR 侧的收尾:close 把这个 PR 上面的 `nightme/*` 状态 label
 摘掉(队列标记 `nightme/assigned` 不摘),只摘不贴——PR 的完成状态由平台上的
-merged 表达。分支没开过 PR 就不带这一行。PR 侧收尾失败只告警,不阻断
+merged 表达。分支没开过 PR 就不带这一行;PR 上一个 `nightme/*` label 都没有
+时写 `no nightme/* labels`。PR 侧收尾失败只告警,不阻断
 close 的本地清理:PR 上的 label 是记账,没有任何逻辑读它。摘不掉的 label
 用 `!` 标出——它还在 PR 上,不和摘掉的 label 混在一列。
 
@@ -466,6 +482,15 @@ PR 侧摘 label 发生在 worktree 删掉之后、删分支之前。摘 label �
 
 close 期间 provider 的 CLI 跑在仓库根目录,不在 worktree 里——拆除之后
 worktree 没了,绑在它上面的 CLI 起不来。
+
+不带 `--done` 的 close 完全不连平台:没有要改的 tracker 状态,就没有远程
+调用,平台不可达也照常拆掉本地会话。它同样不查 PR——PR 还开着就还在等
+review,摘掉它身上的 `nightme/ready` 等于宣称这个 PR 不再等 review。
+
+默认 close 之后 issue 上可能还留着 `nightme/wip`:那一轮 fix 的本地会话结束
+了,tracker 上的认领还挂着(死认领)。摘掉它是人的动作,在 issue 页面上摘。
+`/gtw close --done` 是新模型里唯一能改 tracker 状态的入口,它的语义是
+「做完」。
 
 ### 4.1b Format 1(back)
 
@@ -722,10 +747,14 @@ claim(别的 `/gtw fix` 持着它),保留原来的措辞:
 
 ```
 ❌ Issue #42 is already claimed — label "nightme/wip" is present
-→ another /gtw fix holds this issue (or an earlier one never closed)
-↳ to release it: /cwd into that fix's worktree and run `/gtw close`
-↳ if the claim is stale, remove the nightme/wip label on the issue page
+→ a fix claimed this issue; the claim marker comes off with `/gtw pr --ready`
+↳ to release it: remove the nightme/wip label on the issue page
+↳ to tear down a live fix's worktree: /cwd into it and run `/gtw close`
 ```
+
+认领只能由人摘:不带 `--done` 的 `/gtw close` 不动 tracker,拆掉 worktree
+之后 issue 上的 `nightme/wip` 还挂着,这就是死认领——由人在 issue 页面上
+摘掉。
 
 其它状态 label(`nightme/ready`、`nightme/revise`、`nightme/done` …)用另一
 张卡 —— claim 的说法对它们不成立:

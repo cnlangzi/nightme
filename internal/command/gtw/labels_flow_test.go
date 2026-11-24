@@ -188,7 +188,7 @@ func TestRunClose_UnreadableCatalog_ClosesWithWarning(t *testing.T) {
 	prov.SetListLabelsErr(errors.New("403 Forbidden: missing Labels read scope"))
 	seedFixRemote(t, rig, prov, wt, repoRoot)
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 

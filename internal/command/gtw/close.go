@@ -38,18 +38,22 @@ const maxDirtyFilesReported = 10
 // RunClose is the entry point for `/gtw close`. Mirrors RunFix
 // in shape (ctx, cs, deps, chatID, messageID; returns
 // *Result, error) so the factory can wire it through the same
-// dispatcher pipeline. The trailing reset flag is the `--reset`
-// switch: clear the issue's state labels without marking the work
-// done.
+// dispatcher pipeline. The trailing done flag is the `--done`
+// switch: mark the work finished on the tracker.
 //
-// The close tears the fix down on both sides: locally (worktree,
-// branch, cwd) and on the tracker (the issue's and the pull
-// request's `nightme/*` labels). The default mode finalises the
-// issue — every `nightme/*` label but the queue marker comes off
-// and `nightme/done` goes on; the `reset` mode only clears the
-// state labels and marks nothing, for dropping the work without
-// calling it done. A local fix has no issue, so the issue-side
-// label step is skipped entirely.
+// The default close tears the fix down locally only — worktree,
+// branch, cwd. The tracker is left exactly as it was: ending the
+// local session says nothing about the work being finished, and a
+// wrong tracker state is more expensive than no tracker state. The
+// `--done` close finalises the issue — every `nightme/*` label but
+// the queue marker comes off and `nightme/done` goes on — and takes
+// the `nightme/*` labels off the pull request the branch opened.
+//
+// The two modes differ in what they touch, not in how they tear the
+// local session down:
+//
+//	default   issue labels untouched, PR labels untouched, no platform call
+//	--done    issue labels finalised, PR labels finalised
 //
 // Flow (wip/gtw.md §14.5):
 //
@@ -58,7 +62,7 @@ const maxDirtyFilesReported = 10
 //
 //  2. Refuse if missing — there's no active fix in this chat.
 //
-//     2.5. Finalise the issue's labels (ModeRemote only).
+//     2.5. Finalise the issue's labels (`--done` only).
 //
 //     The issue side GATES the local cleanup: a platform-API failure
 //     (auth expired, network down, repo moved) leaves the worktree +
@@ -77,7 +81,8 @@ const maxDirtyFilesReported = 10
 //     a retry cannot converge and a restore would only wedge the
 //     issue.
 //
-//     2.7. Look up the pull request the branch opened.
+//     2.7. Look up the pull request the branch opened (`--done`
+//     only).
 //
 //     The number comes from the workspace's PR cache first (the
 //     branch's own entry — /gtw pr already wrote it) and from the
@@ -102,14 +107,14 @@ const maxDirtyFilesReported = 10
 //     worktree — no explicit unlink needed.
 //
 //     4.5. Finalise the pull request's labels, between the worktree
-//     removal (4) and the branch deletion (5). They only WARN:
-//     the pull request's labels are bookkeeping that nothing reads,
-//     so a failure there must not keep the branch behind. The
-//     number comes from step 2.7, so this step only needs the
-//     number. Running it after the worktree removal means a close
-//     that aborts earlier (step 3 / step 4) leaves the pull
-//     request's labels alone, so they need no compensation. A branch
-//     without a PR has nothing to finalize and nothing to say.
+//     removal (4) and the branch deletion (5) (`--done` only).
+//     They only WARN: the pull request's labels are bookkeeping
+//     that nothing reads, so a failure there must not keep the
+//     branch behind. The number comes from step 2.7, so this step
+//     only needs the number. Running it after the worktree removal
+//     means a close that aborts earlier (step 3 / step 4) leaves the
+//     pull request's labels alone, so they need no compensation. A
+//     branch without a PR has nothing to finalize and nothing to say.
 //
 //  5. `git branch -D <branch>` from repoRoot (always force-
 //     delete — close is a "tear down the experiment" action
@@ -148,7 +153,7 @@ func RunClose(
 	cs *chatsession.ChatSession,
 	deps HandlerDeps,
 	chatID, messageID string,
-	reset bool,
+	done bool,
 ) (*Result, error) {
 	selectedCwd := cs.SelectedCwd()
 
@@ -277,16 +282,28 @@ func RunClose(
 	// The pull request's labels are handled later (step 4.5): they
 	// are bookkeeping that nothing reads, so they only WARN, and
 	// they only come off once the local cleanup has succeeded.
-	plat := resolveClosePlatform(ctx, c, deps)
+	//
+	// Only the `--done` close has tracker state to write, so the
+	// default close resolves no platform at all — it works with the
+	// tracker unreachable.
+	var plat closePlatform
+	var labels labelFinalize
+	var pr *messages.PR
+	var labelWarning, prLookupWarning, prLabelWarning string
 
-	labels, aborted, labelWarning := finalizeIssueLabels(ctx, c, plat, deps, cs, chatID, messageID, reset)
-	if aborted {
-		// The helper already sent a user-facing error reply. Bail
-		// before any local cleanup so the yml-driven state
-		// (worktree + branch + ASes) stays fully intact.
-		reportOutcome(ctx, command.FailedOutcome(http.StatusServiceUnavailable,
-			"the issue labels could not be finalized"))
-		return &Result{Consumed: true}, nil
+	if done {
+		plat = resolveClosePlatform(ctx, c, deps)
+
+		l, aborted, w := finalizeIssueLabels(ctx, c, plat, deps, cs, chatID, messageID)
+		if aborted {
+			// The helper already sent a user-facing error reply. Bail
+			// before any local cleanup so the yml-driven state
+			// (worktree + branch + ASes) stays fully intact.
+			reportOutcome(ctx, command.FailedOutcome(http.StatusServiceUnavailable,
+				"the issue labels could not be finalized"))
+			return &Result{Consumed: true}, nil
+		}
+		labels, labelWarning = l, w
 	}
 	// A failed label-catalog check is a warning, not a failure: the
 	// close still runs to its normal result. The warning rides
@@ -298,7 +315,6 @@ func RunClose(
 	// prLookupWarning is filled in by the PR lookup (step 2.7) and
 	// prLabelWarning by the PR-side finalization further down
 	// (step 4.5); the closure reads them when it runs.
-	var prLookupWarning, prLabelWarning string
 	withWarning := func(body string) string {
 		return prependWarning(body, labelWarning, prLookupWarning, prLabelWarning)
 	}
@@ -336,7 +352,12 @@ func RunClose(
 	// installed. Fetching it up front also spares the platform a
 	// round-trip: /gtw pr already wrote the number into the
 	// workspace's PR cache.
-	pr, prLookupWarning := lookupClosePR(ctx, c, plat, deps)
+	//
+	// Only the `--done` close looks the pull request up: the default
+	// close leaves its labels alone, so the number would go unused.
+	if done {
+		pr, prLookupWarning = lookupClosePR(ctx, c, plat, deps)
+	}
 
 	// --- step 3: dirty check --------------------------------------
 	// Close is intentionally all-or-nothing — the user must
@@ -397,7 +418,14 @@ func RunClose(
 	// A failure here only WARNs: the PR's labels are bookkeeping
 	// that nothing reads, and the local teardown must not wait for
 	// them.
-	prLabels, prLabelWarning := finalizePRLabels(ctx, plat, pr)
+	//
+	// Only the `--done` close finalises them: a pull request that is
+	// still open is still waiting for review, and taking `nightme/*`
+	// off it would say otherwise.
+	var prLabels prLabelFinalize
+	if done {
+		prLabels, prLabelWarning = finalizePRLabels(ctx, plat, pr)
+	}
 
 	// --- step 5: delete the local branch --------------------------
 	// `-D` (uppercase) is force-delete — refuses to keep the
@@ -407,12 +435,18 @@ func RunClose(
 	// hostile. Recovery remains possible via reflog if needed.
 	// Mirrors the rollback path in fix.go.
 	if _, brStderr, brErr := deps.Git.Run(ctx, c.RepoRoot, "branch", "-D", c.Branch); brErr != nil {
+		// The issue's labels are only this close's business in the
+		// `--done` mode; in the default mode they were never touched.
+		labelsNote := "(the issue's labels were left alone — the worktree is already gone, so there is no fix left to close)"
+		if done {
+			labelsNote = "(the issue keeps the labels this close set — the worktree is already gone, so there is no fix left to close)"
+		}
 		body := fmt.Sprintf(
 			"❌ git branch -D %s failed: %v\n"+
 				"[git stderr tail]\n%s\n"+
 				"hint: worktree at %s is already removed; clean up the branch manually with `git branch -D %s`\n"+
-				"(the issue keeps the labels this close set — the worktree is already gone, so there is no fix left to close)",
-			c.Branch, brErr, tailLines(brStderr, 10), c.Worktree, c.Branch,
+				"%s",
+			c.Branch, brErr, tailLines(brStderr, 10), c.Worktree, c.Branch, labelsNote,
 		)
 		// No compensation here. The worktree is gone, and with it the
 		// yml — the recovery source of truth. A retry cannot converge
@@ -477,8 +511,16 @@ func RunClose(
 	// The platform half of the close: what came off the issue and
 	// what went on. The row is absent when the close touched no
 	// issue (a local fix, or an issue the tracker no longer knows).
-	if line := labels.cardLine(); line != "" {
-		body += "\n" + line
+	//
+	// The default close has no platform half — it says instead that
+	// the labels are still on the issue, because the tracker state
+	// is now the human's to maintain.
+	issueLine := issueLeftAloneLine(c)
+	if done {
+		issueLine = labels.cardLine()
+	}
+	if issueLine != "" {
+		body += "\n" + issueLine
 	}
 	// The same for the pull request the branch opened. The row is
 	// absent when the branch never had a PR.
@@ -556,9 +598,7 @@ type labelFinalize struct {
 	// name the platform reported.
 	removed []string
 
-	// added is the label this close put on the issue — LabelDone in
-	// the default mode. Empty in the --reset mode, which marks
-	// nothing.
+	// added is the label this close put on the issue — LabelDone.
 	added string
 
 	// addedPreexisting is true when the issue already carried
@@ -591,6 +631,27 @@ func (l labelFinalize) cardLine() string {
 	}
 	return labelCard{removed: l.removed, added: l.added}.
 		row("issue", l.owner, l.repo, l.issue)
+}
+
+// issueLeftAloneLine renders the issue row of the close card for the
+// default close: the close touched no tracker state, and the card
+// says so — the issue still carries its labels, and a stale claim is
+// cleared by hand.
+//
+// The owner/repo and the issue number come from the yml snapshot
+// (Context.Repo / Context.Issue), never from the platform: the
+// default close makes no remote call.
+//
+// Empty when the fix is local — a local fix has no issue.
+func issueLeftAloneLine(c Context) string {
+	if c.Issue <= 0 {
+		return ""
+	}
+	target := fmt.Sprintf("#%d", c.Issue)
+	if c.Repo != "" {
+		target = c.Repo + target
+	}
+	return fmt.Sprintf("→ issue: %s (labels left alone — clear them by hand if the claim is stale)", target)
 }
 
 // labelCard is the label bookkeeping one row of the close card
@@ -662,9 +723,8 @@ func resolveClosePlatform(ctx context.Context, c Context, deps HandlerDeps) clos
 // finalizeIssueLabels drives the issue half of the close: it
 // brings the issue's `nightme/*` labels to the state the close means.
 //
-// The default mode marks the work done — every `nightme/*` label but
-// the queue marker comes off and `nightme/done` goes on. The reset
-// mode only clears: the state labels come off, nothing goes on.
+// It marks the work done — every `nightme/*` label but the queue
+// marker comes off and `nightme/done` goes on.
 //
 // The removal set comes from the issue's own labels, not from
 // AllLabels: a hand-made `nightme/custom` is a nightme label too,
@@ -695,7 +755,6 @@ func finalizeIssueLabels(
 	deps HandlerDeps,
 	cs *chatsession.ChatSession,
 	chatID, messageID string,
-	reset bool,
 ) (labelFinalize, bool, string) {
 	// ModeLocal always writes Issue == -1 (types.go), and legacy yml
 	// snapshots that predate the Mode field still have a positive
@@ -760,13 +819,11 @@ func finalizeIssueLabels(
 		}
 		if strings.EqualFold(label, LabelDone) {
 			donePreexisting = true
-			if !reset {
-				// The default mode puts `nightme/done` on the issue
-				// right after this list is computed; taking it off
-				// again would undo that. A stale `nightme/done` stays
-				// — which is the state the close wants.
-				continue
-			}
+			// The close puts `nightme/done` on the issue right after
+			// this list is computed; taking it off again would undo
+			// that. A stale `nightme/done` stays — which is the state
+			// the close wants.
+			continue
 		}
 		toRemove = append(toRemove, label)
 	}
@@ -775,17 +832,15 @@ func finalizeIssueLabels(
 	// state labels it had, which is a state the user can read. The
 	// reverse order would strip the issue bare and then fail.
 	added := ""
-	if !reset {
-		if err := prov.AddIssueLabel(ctx, owner, repo, c.Issue, LabelDone); err != nil {
-			reply(ctx, cs.Emitter(), chatID, messageID, prependWarning(fmt.Sprintf(
-				"❌ could not add label %q to issue #%d: %v\n"+
-					"worktree and branch are left intact — retry /gtw close once "+
-					"the platform call succeeds (auth / network / repo moved).",
-				LabelDone, c.Issue, err), warning))
-			return labelFinalize{}, true, warning
-		}
-		added = LabelDone
+	if err := prov.AddIssueLabel(ctx, owner, repo, c.Issue, LabelDone); err != nil {
+		reply(ctx, cs.Emitter(), chatID, messageID, prependWarning(fmt.Sprintf(
+			"❌ could not add label %q to issue #%d: %v\n"+
+				"worktree and branch are left intact — retry /gtw close once "+
+				"the platform call succeeds (auth / network / repo moved).",
+			LabelDone, c.Issue, err), warning))
+		return labelFinalize{}, true, warning
 	}
+	added = LabelDone
 
 	for _, label := range toRemove {
 		if err := prov.RemoveIssueLabel(ctx, owner, repo, c.Issue, label); err != nil {
@@ -816,6 +871,9 @@ func finalizeIssueLabels(
 // fails AFTER the labels changed — the platform would otherwise say
 // "done" while the local side still has the worktree / branch / yml,
 // and the retry would face that divergence.
+//
+// Only the `--done` close has labels to put back: the default close
+// changes nothing on the tracker, so there is nothing to restore.
 //
 // Best-effort: the returned line names whatever could not be put
 // back. A restore failure is communicated but does NOT escalate into

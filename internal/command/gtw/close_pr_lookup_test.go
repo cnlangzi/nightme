@@ -37,7 +37,7 @@ func TestRunClose_PRFromCache_NoPlatformLookup(t *testing.T) {
 	}, "fix/42-test")
 	prov.SetPRLabels(7, []string{LabelReady})
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -70,7 +70,7 @@ func TestRunClose_PRCacheMiss_FallsBackToThePlatform(t *testing.T) {
 	// the cache keeps what the platform answered.
 	rig.git.statusResp = " M foo.txt\n"
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -85,7 +85,7 @@ func TestRunClose_PRCacheMiss_FallsBackToThePlatform(t *testing.T) {
 	// nothing.
 	rig.git.statusResp = ""
 	before := prLookupCalls(prov)
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-2", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-2", true); err != nil {
 		t.Fatalf("RunClose (retry): %v", err)
 	}
 	if n := prLookupCalls(prov) - before; n != 0 {
@@ -109,7 +109,7 @@ func TestRunClose_PRCacheHoldsAnotherBranch_FallsBackToThePlatform(t *testing.T)
 	}, "other/branch")
 	seedPR(t, prov, "fix/42-test", 7, LabelReady)
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -139,7 +139,7 @@ func TestRunClose_PRLookupFailure_WarnsAndTearsDown(t *testing.T) {
 	seedFixRemote(t, rig, prov, wt, repoRoot)
 	prov.SetFindPRForBranchErr("fix/42-test", errors.New("network is unreachable"))
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -190,7 +190,7 @@ func TestRunClose_PRCacheHoldsANumberlessPR_FallsBackToThePlatform(t *testing.T)
 	}, "fix/42-test")
 	seedPR(t, prov, "fix/42-test", 7, LabelReady)
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -221,7 +221,7 @@ func TestRunClose_PRCacheHoldsAnotherReposPR_FallsBackToThePlatform(t *testing.T
 	}, "fix/42-test")
 	seedPR(t, prov, "fix/42-test", 7, LabelReady)
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -257,7 +257,7 @@ func TestRunClose_ProviderCLIRunsInTheRepoRoot(t *testing.T) {
 		return prov, nil
 	}
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 

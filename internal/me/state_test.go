@@ -622,10 +622,11 @@ func TestATakeoverOfAPausedRunPublishesNoState(t *testing.T) {
 	}
 }
 
-// TestTheBudgetPausePublishesTheState — the run stops because the step
-// used up its budget: the state of the round is published under the
-// card of the round.
-func TestTheBudgetPausePublishesTheState(t *testing.T) {
+// TestTheBudgetPausePublishesNoStateOfItsOwn — the run stops because
+// the step used up its budget. The card of the decision is on the
+// screen: the run opens no card of its own, and the reason of the
+// pause reaches the operator in the chat.
+func TestTheBudgetPausePublishesNoStateOfItsOwn(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", budgetWorkflow)
 
@@ -642,14 +643,20 @@ func TestTheBudgetPausePublishesTheState(t *testing.T) {
 	}
 	waitPaused(t, svc, "obs-1")
 	r := activeRun(t, svc, "obs-1")
-	round := r.roundSessionRef()
-	if round == nil {
-		t.Fatal("the run has no card of the round")
+	if r.decisionSessionRef() == nil {
+		t.Fatal("the run has no card of the decision")
 	}
 
-	card, _ := waitForStateCardWith(t, op, `paused: the step "commit" used up its budget`, 4)
-	if card.ReplyTo == "" {
-		t.Error("the card of the state hangs under nothing")
+	// The chat is told why the run waits.
+	waitSpoken(t, op, `The run paused: the step "commit" used up its budget`)
+
+	// The state of the run is nowhere on a card of its own.
+	for _, c := range op.Cards() {
+		for _, entry := range op.Entries(c.ID) {
+			if strings.HasPrefix(entry, "paused: ") {
+				t.Errorf("the run published the phase line on %q: %q", c.ID, entry)
+			}
+		}
 	}
 }
 

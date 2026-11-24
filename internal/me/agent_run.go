@@ -249,13 +249,6 @@ type run struct {
 	toolCount  int
 	// lastBeatAt is when the run last did something.
 	lastBeatAt time.Time
-	// commandMsgIDs holds the id of the chat message every step that
-	// sent a command became. The decision about a step hangs under
-	// that message.
-	commandMsgIDs map[string]string
-	// lastCommandMsgID is the id of the message the last command
-	// became.
-	lastCommandMsgID string
 	// gitStatus is the repository facts of the run's workspace. They
 	// ride in the footer's workspace line, and they are read now and
 	// then: a git call per event would cost more than the line is
@@ -364,7 +357,6 @@ func newRun(svc *Service, req Request, wf *wfe.Workflow, args map[string]string)
 		phase:         PhaseRunning,
 		situationIdx:  -1,
 		roundSessions: map[iteration]*session{},
-		commandMsgIDs: map[string]string{},
 		ctx:           ctx,
 		cancel:        cancel,
 		resume:        make(chan struct{}, 1),
@@ -1457,23 +1449,6 @@ func (r *run) setRunSession(sess *session) {
 	r.mu.Unlock()
 }
 
-// setLastCommandMsgID records the message the last command became.
-func (r *run) setLastCommandMsgID(msgID string) {
-	if msgID == "" {
-		return
-	}
-	r.mu.Lock()
-	r.lastCommandMsgID = msgID
-	r.mu.Unlock()
-}
-
-// lastCommandMsgIDValue returns the message the last command became.
-func (r *run) lastCommandMsgIDValue() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.lastCommandMsgID
-}
-
 // resetRound forgets what the round the run is in spent and decided.
 //
 // The round session shows what the round spent since the run entered
@@ -1518,36 +1493,6 @@ func (r *run) gitStatusValue() *messages.GitStatus {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.gitStatus
-}
-
-// commandMsgIDsLocked returns the messages the steps' commands
-// became. The caller holds the lock.
-func (r *run) commandMsgIDsLocked() map[string]string {
-	if len(r.commandMsgIDs) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(r.commandMsgIDs))
-	for stepID, msgID := range r.commandMsgIDs {
-		out[stepID] = msgID
-	}
-	return out
-}
-
-// rememberCommandMsg records the chat message a step's command
-// became.
-//
-// The decision about that step hangs under that message: the decision
-// reads directly after the error it answers.
-func (r *run) rememberCommandMsg(stepID, msgID string) {
-	if stepID == "" || msgID == "" {
-		return
-	}
-	r.mu.Lock()
-	if r.commandMsgIDs == nil {
-		r.commandMsgIDs = map[string]string{}
-	}
-	r.commandMsgIDs[stepID] = msgID
-	r.mu.Unlock()
 }
 
 // roundSessionRef returns the session of the round the run is in.

@@ -263,9 +263,6 @@ func (s *Service) runAttempt(ctx context.Context, r *run, job string, step wfe.S
 		defer restore()
 	}
 	res, err := s.runCommand(ctx, r, a.command, false)
-	// The decision about this step hangs under the message its command
-	// became: the decision reads directly after the error it answers.
-	r.rememberCommandMsg(step.ID, r.lastCommandMsgIDValue())
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return stepVerdict{}, stepResult{}, err

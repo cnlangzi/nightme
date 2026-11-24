@@ -16,11 +16,14 @@ import (
 	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
+// takeoverMark opens the body of the card of a decision.
+const takeoverMark = "**" + BotMark
+
 // decisionCards returns the cards the run opened for a decision.
 func decisionCards(op *fakeOperator) []cardRecord {
 	out := make([]cardRecord, 0, 2)
 	for _, c := range op.Cards() {
-		if strings.HasPrefix(c.Body, decisionMark) {
+		if strings.HasPrefix(c.Body, takeoverMark) {
 			out = append(out, c)
 		}
 	}

@@ -16,24 +16,29 @@ import (
 	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
+// takeoverMark opens the body of the card of a decision.
+const takeoverMark = "**" + BotMark
+
 // decisionCards returns the cards the run opened for a decision.
 func decisionCards(op *fakeOperator) []cardRecord {
 	out := make([]cardRecord, 0, 2)
 	for _, c := range op.Cards() {
-		if strings.HasPrefix(c.Body, decisionLine) {
+		if strings.HasPrefix(c.Body, takeoverMark) {
 			out = append(out, c)
 		}
 	}
 	return out
 }
 
-// TestTheTakeoverNamesTheStepOnlyWhenItHasOne — a judgment that names
-// no step takes the workflow over without a step name.
-func TestTheTakeoverNamesTheStepOnlyWhenItHasOne(t *testing.T) {
-	if got := decisionTakeover("commit"); got != "NightMe is taking over the workflow · commit" {
+// TestTheTakeoverStandsOutAndNamesTheStepOnlyWhenItHasOne — the
+// takeover line carries the mark of the agent in bold, so that it is
+// seen at once among the entries of the card, and it names the step
+// only when the judgment has one.
+func TestTheTakeoverStandsOutAndNamesTheStepOnlyWhenItHasOne(t *testing.T) {
+	if got := decisionTakeover("commit"); got != "**🧑‍💻: NightMe is taking over the workflow · commit**" {
 		t.Errorf("the takeover is %q, want it to name the step", got)
 	}
-	if got := decisionTakeover(""); got != "NightMe is taking over the workflow" {
+	if got := decisionTakeover(""); got != "**🧑‍💻: NightMe is taking over the workflow**" {
 		t.Errorf("the takeover is %q, want it to name no step", got)
 	}
 }
@@ -94,7 +99,7 @@ func TestTheDecisionOfAnotherStepOpensACardOfItsOwn(t *testing.T) {
 	if len(cards) != 2 {
 		t.Fatalf("the run opened %d cards of the decision, want one per step: %v", len(cards), op.Cards())
 	}
-	if !strings.HasSuffix(cards[1].Body, "· review") {
+	if !strings.Contains(cards[1].Body, "· review") {
 		t.Errorf("the second card opens with %q, want it to name the step", cards[1].Body)
 	}
 }
@@ -190,7 +195,7 @@ func TestTheJudgmentOfTheStepLandsOnItsCard(t *testing.T) {
 		t.Fatalf("the run opened %d cards of the decision, want one: %v", len(cards), op.Cards())
 	}
 	card := cards[0].ID
-	if want := "NightMe is taking over the workflow · commit"; cards[0].Body != want {
+	if want := "**🧑‍💻: NightMe is taking over the workflow · commit**"; cards[0].Body != want {
 		t.Errorf("the card opens with %q, want %q", cards[0].Body, want)
 	}
 

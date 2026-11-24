@@ -319,12 +319,15 @@ func (s *Service) openDecisionSession(ctx context.Context, r *run) {
 // decisionTakeover renders the line that opens the card of a decision.
 //
 // The line names the step the agent takes over: the card is read on
-// its own, and the step says what the decision is about.
+// its own, and the step says what the decision is about. It carries
+// the mark of the agent in bold: the takeover has to be seen at once
+// among the entries of the card.
 func decisionTakeover(stepID string) string {
-	if stepID == "" {
-		return decisionLine
+	line := decisionLine
+	if stepID != "" {
+		line += " · " + stepID
 	}
-	return decisionLine + " · " + stepID
+	return fmt.Sprintf("**%s%s**", BotMark, line)
 }
 
 // publishReason publishes why the decision was taken.

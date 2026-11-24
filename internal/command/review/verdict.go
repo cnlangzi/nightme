@@ -173,6 +173,10 @@ func (v *selfVerdict) report() {
 // not there before. A review whose findings were not addressed is a
 // normal result too: the agent read the findings and left the
 // workspace alone. The two cases differ in a fact, not in the status.
+//
+// The fact is what a consumer reads: the settled outcome keeps the
+// words the delivery reported, so the `addressed` fact is the only
+// thing that says what came of the findings.
 func judgeReview(before, after workspaceState, findings int, runner string) outcome.Outcome {
 	data := map[string]string{KeyAgent: runner}
 	if findings > 0 {
@@ -188,18 +192,14 @@ func judgeReview(before, after workspaceState, findings int, runner string) outc
 	}
 	addressed := after.head != before.head || after.status != before.status
 	data[BoolKeyAddressed] = strconv.FormatBool(addressed)
+	text := "the review's findings were not addressed"
 	if addressed {
-		return outcome.Outcome{
-			Success:    true,
-			Status:     http.StatusOK,
-			StatusText: "the review's findings were addressed",
-			Data:       data,
-		}
+		text = "the review's findings were addressed"
 	}
 	return outcome.Outcome{
 		Success:    true,
 		Status:     http.StatusOK,
-		StatusText: "the review's findings were not addressed",
+		StatusText: text,
 		Data:       data,
 	}
 }

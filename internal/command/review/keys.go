@@ -10,7 +10,8 @@ const (
 	// BoolKeyAddressed says whether the findings were acted on: the
 	// workspace carries a new commit or a new change since the
 	// findings went out. It is absent when the review found no
-	// findings and when the workspace could not be read.
+	// findings, when the agent's turn did not end cleanly, and when
+	// the workspace could not be read.
 	BoolKeyAddressed = "addressed"
 	// KeyAgent is the name of the agent that ran the review.
 	KeyAgent = "agent"

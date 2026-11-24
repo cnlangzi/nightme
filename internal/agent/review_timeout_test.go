@@ -60,10 +60,13 @@ func TestGroupWatchdog_AHeartbeatResetsTheTimer(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 
-	w := newGroupWatchdog(60*time.Millisecond, cancel)
+	// The window is wide enough that a scheduling hiccup does not
+	// close the group, and the loop runs past it: a watchdog that
+	// ignored the heartbeats would close the group.
+	w := newGroupWatchdog(150*time.Millisecond, cancel)
 	defer w.stop()
 
-	deadline := time.Now().Add(200 * time.Millisecond)
+	deadline := time.Now().Add(400 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		w.beat()
 		time.Sleep(20 * time.Millisecond)

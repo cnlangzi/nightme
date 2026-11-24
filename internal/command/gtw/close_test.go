@@ -1118,9 +1118,82 @@ func TestRunClose_TransientStatError_PreservesState(t *testing.T) {
 
 // --- the close finalises the issue's labels ---------------------
 
+// TestRunClose_ModeRemote_CardSaysTheLabelsWereLeftAlone pins the
+// card of the default close: it says the issue's labels are still on
+// the issue, so a stale claim does not pass unnoticed. The owner/repo
+// and the issue number come from the yml snapshot — the default close
+// makes no remote call.
+func TestRunClose_ModeRemote_CardSaysTheLabelsWereLeftAlone(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	seedFixRemote(t, rig, prov, wt, repoRoot)
+
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+
+	card := rig.rec.lastText()
+	if !strings.Contains(card, "labels left alone") {
+		t.Errorf("card must say the labels were left alone:\n%s", card)
+	}
+	if !strings.Contains(card, "#42") {
+		t.Errorf("card must name the issue:\n%s", card)
+	}
+}
+
+// TestRunClose_ModeRemote_CardNamesTheSnapshotRepo pins that the
+// issue row of the default close names the repository the yml
+// snapshot carries — the row is rendered from the snapshot, so no
+// remote call is needed for it.
+func TestRunClose_ModeRemote_CardNamesTheSnapshotRepo(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	rig.deps.Detect = fakeDetect(prov)
+	// The snapshot names the repository — the fix wrote it there.
+	if err := os.MkdirAll(filepath.Join(wt, nightmedir.DirName), 0o755); err != nil {
+		t.Fatalf("mkdir .nightme: %v", err)
+	}
+	if err := WriteGTWYml(wt, Context{
+		Mode:     ModeRemote,
+		Issue:    42,
+		Branch:   "fix/42-test",
+		Worktree: wt,
+		RepoRoot: repoRoot,
+		Repo:     "cnlangzi/nightme",
+		Provider: "github",
+		State:    StateFixing,
+	}, rig.deps.Now); err != nil {
+		t.Fatalf("WriteGTWYml: %v", err)
+	}
+	if err := rig.cs.SetSelectedCwd(wt); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+
+	card := rig.rec.lastText()
+	want := "→ issue: cnlangzi/nightme#42 (labels left alone — clear them by hand if the claim is stale)"
+	if !strings.Contains(card, want) {
+		t.Errorf("card missing %q:\n%s", want, card)
+	}
+	// The row came from the snapshot, not from the platform.
+	if calls := prov.Calls(); len(calls) != 0 {
+		t.Errorf("provider calls = %+v, want none (the default close does not reach the tracker)", calls)
+	}
+}
+
 // TestRunClose_ModeRemote_FinalizesTheIssue pins the platform half
-// of the close: the claim marker comes off the issue, `nightme/done`
-// goes on, and the queue marker stays. The card names both.
+// of the `--done` close: the claim marker comes off the issue,
+// `nightme/done` goes on, and the queue marker stays. The card names
+// both.
 func TestRunClose_ModeRemote_FinalizesTheIssue(t *testing.T) {
 	wt := t.TempDir()
 	repoRoot := t.TempDir()
@@ -1129,7 +1202,7 @@ func TestRunClose_ModeRemote_FinalizesTheIssue(t *testing.T) {
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	seedFixRemote(t, rig, prov, wt, repoRoot)
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -1178,7 +1251,7 @@ func TestRunClose_ModeRemote_DirtyRestoresTheIssue(t *testing.T) {
 	seedFixRemote(t, rig, prov, wt, repoRoot)
 	rig.git.statusResp = " M foo.txt\n" // dirty
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -1232,7 +1305,7 @@ func TestRunClose_ModeRemote_WorktreeRemoveFailsRestoresTheIssue(t *testing.T) {
 	rig.git.worktreeRemoveErr = &fakeExitError{code: 128, msg: "worktree remove failed"}
 	rig.git.worktreeRemoveStderr = "fatal: could not remove worktree"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -1288,7 +1361,7 @@ func TestRunClose_ModeRemote_BranchDeleteFailsKeepsTheLabelsFinalized(t *testing
 	rig.git.branchDeleteErr = &fakeExitError{code: 1, msg: "branch delete failed"}
 	rig.git.branchDeleteStderr = "error: branch 'fix/42-test' not found"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}

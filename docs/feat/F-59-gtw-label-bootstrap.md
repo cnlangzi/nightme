@@ -40,7 +40,7 @@ label catalog 里没有某个标签，那个标签就**挂不到任何 issue 上
 4. **跑在哪**：`/gtw fix` 在**队列挑选之前**跑，失败即致命（此时
    还没有 worktree，没有东西要回滚）；`/gtw pr` / `/gtw new -y` 跑在
    各自的 tracker 路径上，失败只给一行 `⚠️` 警告，命令照常跑完。
-   `/gtw close` 跑检查 —— 它要往 issue 上贴 `nightme/done`，失败只给
+   `/gtw close --done` 跑检查 —— 它要往 issue 上贴 `nightme/done`，失败只给
    一行 `⚠️` 警告，命令照常跑完。provider 探测不跑检查。
 
 设计上保证：任何一条会跟 tracker 说话的 gtw 命令，都不会因为
@@ -298,10 +298,11 @@ type LabelCache struct {
 | `/gtw fix` | remote 路径，owner/repo 解析之后、**队列挑选之前** | 致命 —— 命令回显错误就停，此时还没有 worktree |
 | `/gtw pr` | provider 解析之后、开 PR 之前 | 回复里给一行 `⚠️` 警告，命令继续 |
 | `/gtw new -y` | 建 issue 的路径（provider 解析之后） | 回复里给一行 `⚠️` 警告，命令继续 |
-| `/gtw close` | provider 解析之后、动 issue 标签之前 | 回复里给一行 `⚠️` 警告，命令继续 |
+| `/gtw close --done` | provider 解析之后、动 issue 标签之前 | 回复里给一行 `⚠️` 警告，命令继续 |
 
-`/gtw close` 一样检查 —— 它要往 issue 上贴 `nightme/done`，贴不上时那一步
-自己会报错，所以检查失败只给一行 `⚠️` 警告，close 照常跑完。
+`/gtw close --done` 一样检查 —— 它要往 issue 上贴 `nightme/done`，贴不上时那一步
+自己会报错，所以检查失败只给一行 `⚠️` 警告，close 照常跑完。不带 `--done` 的
+close 不动 tracker，一次平台调用都不发，所以不检查。
 
 `/gtw new` 不带 `-y` 只把讨论变成草稿，不写 tracker，所以不检查。
 

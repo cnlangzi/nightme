@@ -1,9 +1,9 @@
 package gtw
 
 // Tests for the PR half of /gtw close: the pull request the branch
-// opened gets its `nightme/*` state labels taken off before the
-// branch is deleted, a failure there only warns, and a branch
-// without a pull request says nothing at all.
+// opened keeps its `nightme/*` state labels in the default close and
+// loses them in the `--done` close, a failure there only warns, and a
+// branch without a pull request says nothing at all.
 
 import (
 	"context"
@@ -58,9 +58,9 @@ func assertPRLabels(t *testing.T, prov *fakeGitProvider, number int, want ...str
 	}
 }
 
-// TestRunClose_FinalizesPRLabels pins the PR side of the close: the
-// `nightme/*` state labels come off the pull request, the queue
-// marker stays (it belongs to the queue, and the queue marker is
+// TestRunClose_FinalizesPRLabels pins the PR side of the `--done`
+// close: the `nightme/*` state labels come off the pull request, the
+// queue marker stays (it belongs to the queue, and the queue marker is
 // not put on a PR), and the labels outside the namespace are
 // untouched.
 func TestRunClose_FinalizesPRLabels(t *testing.T) {
@@ -72,7 +72,7 @@ func TestRunClose_FinalizesPRLabels(t *testing.T) {
 	seedFixRemote(t, rig, prov, wt, repoRoot)
 	seedPR(t, prov, "fix/42-test", 7, LabelReady, LabelAssigned, "bug")
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -83,6 +83,28 @@ func TestRunClose_FinalizesPRLabels(t *testing.T) {
 	want := "→ pr: cnlangzi/nightme#7 -" + LabelReady
 	if !strings.Contains(card, want) {
 		t.Errorf("card missing %q:\n%s", want, card)
+	}
+}
+
+// TestRunClose_PRFinalize_NoNightmeLabels_SaysSo pins the card
+// variant for a pull request that carries no nightme label: there is
+// nothing to take off, and the card says so.
+func TestRunClose_PRFinalize_NoNightmeLabels_SaysSo(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	seedFixRemote(t, rig, prov, wt, repoRoot)
+	seedPR(t, prov, "fix/42-test", 7, "bug")
+
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+
+	card := rig.rec.lastText()
+	if !strings.Contains(card, "→ pr: cnlangzi/nightme#7 no nightme/* labels") {
+		t.Errorf("card must say that no nightme label was there:\n%s", card)
 	}
 }
 
@@ -109,7 +131,7 @@ func TestRunClose_PRFinalizeRunsBeforeTheBranchIsDeleted(t *testing.T) {
 		return &PR{Number: 7, State: "merged"}, nil
 	})
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -138,7 +160,7 @@ func TestRunClose_PRFinalizeFailureWarnsButDoesNotAbort(t *testing.T) {
 
 	work := rig.cs.Hold("msg-1")
 	ctx := chatsession.WithWork(context.Background(), work)
-	if _, err := RunClose(ctx, rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(ctx, rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 	card := rig.rec.lastText()
@@ -208,7 +230,7 @@ func TestRunClose_DirtyWorktree_LeavesPRLabelsAlone(t *testing.T) {
 	seedPR(t, prov, "fix/42-test", 7, LabelReady)
 	rig.git.statusResp = " M foo.txt\n"
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -235,7 +257,7 @@ func TestRunClose_NoPR_SaysNothing(t *testing.T) {
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	seedFixRemote(t, rig, prov, wt, repoRoot)
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -265,7 +287,7 @@ func TestRunClose_ModeLocal_FinalizesPRLabels(t *testing.T) {
 	rig.git.remoteURLResp = "https://github.com/cnlangzi/nightme.git"
 	seedPR(t, prov, "fix/42-test", 7, LabelReady)
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -277,11 +299,11 @@ func TestRunClose_ModeLocal_FinalizesPRLabels(t *testing.T) {
 	}
 }
 
-// TestRunClose_PRFinalize_ResetOnlyRemoves pins that `--reset` on
-// the PR side only takes labels off: the close never puts a label
-// on a pull request, not even the `nightme/done` the issue side
-// attaches.
-func TestRunClose_PRFinalize_ResetOnlyRemoves(t *testing.T) {
+// TestRunClose_PRFinalize_DefaultLeavesTheLabelsAlone pins the PR
+// side of the default close: a pull request that is still open is
+// still waiting for review, so its `nightme/*` labels stay on — the
+// close does not claim the review is over.
+func TestRunClose_PRFinalize_DefaultLeavesTheLabelsAlone(t *testing.T) {
 	wt := t.TempDir()
 	repoRoot := t.TempDir()
 
@@ -290,13 +312,16 @@ func TestRunClose_PRFinalize_ResetOnlyRemoves(t *testing.T) {
 	seedFixRemote(t, rig, prov, wt, repoRoot)
 	seedPR(t, prov, "fix/42-test", 7, LabelReady)
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
-	assertPRLabels(t, prov, 7)
+	assertPRLabels(t, prov, 7, LabelReady)
+	if calls := prov.CallsByMethod("RemovePRLabel"); len(calls) != 0 {
+		t.Errorf("RemovePRLabel calls = %+v, want 0", calls)
+	}
 	card := rig.rec.lastText()
-	if strings.Contains(card, "+"+LabelDone) {
-		t.Errorf("the PR must not report an added label:\n%s", card)
+	if strings.Contains(card, "→ pr:") {
+		t.Errorf("card must not carry a PR row:\n%s", card)
 	}
 }

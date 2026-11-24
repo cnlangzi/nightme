@@ -169,9 +169,9 @@ AddBlockedBy(ctx context.Context, owner, repo string, id, blocker int) error
 
 **`/gtw new -y` 写关系**：草稿里的 `{{ISSUE:NN}}` 引用就是依赖，被引用的 issue 挡着引用它的 issue。建 issue 的循环里，每建好一个 issue 就把它引用到的每个 issue 的关系写进平台 —— 写不进去只警告，命令照旧成功，卡片上多一行 `deps` 列出建成的依赖。关系不落盘：草稿建好 issue 后就被 `.created` 记录换掉，同一对 issue 不会重复建关系。
 
-**认领 = 加一个 label**：fix 认领 issue 时只加 `nightme/wip`，队列标记 `nightme/assigned` 留在 issue 上 —— 自动流程从不摘队列标记，它记录的是这个 issue 属于 NightMe 的队列；只有 `/gtw assign --remove` 摘。认领之后 issue 同时带两个 label，队列过滤按「`nightme/assigned` 一个标签」把它挡在下一轮之外。claim 本身在 `/gtw pr --ready` 把 issue 挪到 `nightme/ready`（见 §3.3）、或者 `/gtw close` 收尾 issue 时才摘。
+**认领 = 加一个 label**：fix 认领 issue 时只加 `nightme/wip`，队列标记 `nightme/assigned` 留在 issue 上 —— 自动流程从不摘队列标记，它记录的是这个 issue 属于 NightMe 的队列；只有 `/gtw assign --remove` 摘。认领之后 issue 同时带两个 label，队列过滤按「`nightme/assigned` 一个标签」把它挡在下一轮之外。claim 本身在 `/gtw pr --ready` 把 issue 挪到 `nightme/ready`（见 §3.3）、或者 `/gtw close --done` 收尾 issue 时才摘。
 
-**认领之后放弃 = 离开队列**：`/gtw close` 收尾 issue 的 label —— 默认把 `nightme/wip` 等状态 label 摘掉、贴上 `nightme/done`，队列标记 `nightme/assigned` 留着。所以「挑起来 → 没做完就 close」的 issue 变成了「做完了」，不在队列里；`/gtw close --reset` 只摘不贴，issue 带着 `nightme/assigned` 回到队列。
+**认领之后放弃 = 由人决定**：默认的 `/gtw close` 只拆本地会话，tracker 上的标签一个都不动 —— 「挑起来 → 这一轮结束」不等于「活儿做完了」，写错的 tracker 状态比不写更贵。`/gtw close --done` 才把 `nightme/wip` 等状态 label 摘掉、贴上 `nightme/done`，队列标记 `nightme/assigned` 留着，于是 issue 变成「做完了」，不在队列里。默认 close 之后 issue 上还留着 `nightme/wip`（死认领）时，由人在 issue 页面上摘掉。
 
 **队列没有原子认领**：`ListIssues` 和贴 `nightme/wip` 之间有窗口，两台机器同时跑 `/gtw fix *` 可能挑到同一个 issue。这跟具名 fix 的既有窗口是同一类 —— label 是协作信号，不是锁（见 §3.2）。
 
@@ -251,7 +251,7 @@ Local 模式（`/gtw fix --name`）同样：branch 存在即失败，无决策�
 
 ### 3.2 Issue 被别的 agent 占用：硬失败
 
-`nightme/wip` 是 gtw 的 claim 标记：`/gtw fix` 贴上，`/gtw pr --ready` 在 PR 出现后把它摘掉换成 `nightme/ready`（见 §3.3），`/gtw close` 在收尾时也把它摘掉（换成 `nightme/done`）。远端模式取到 issue 时若该 label 已存在，说明这个 issue 已被认领（本机或另一台机器），本次 `/gtw fix` 直接拒绝。
+`nightme/wip` 是 gtw 的 claim 标记：`/gtw fix` 贴上，`/gtw pr --ready` 在 PR 出现后把它摘掉换成 `nightme/ready`（见 §3.3），`/gtw close --done` 在收尾时也把它摘掉（换成 `nightme/done`）。远端模式取到 issue 时若该 label 已存在，说明这个 issue 已被认领（本机或另一台机器），本次 `/gtw fix` 直接拒绝。
 
 **判定位置**：`BranchExists` 检查**之后**、任何副作用（preflight / refresh / worktree add / 贴 label / dispatch）**之前**。
 
@@ -276,7 +276,7 @@ claim 保留自己的措辞：
 两条退出指引各自对应一种场景：
 
 - 解除 claim：在 issue 页面上删掉 `nightme/wip`，或者用 `/gtw pr --ready` 开 PR —— 那一步把 claim 换成 `nightme/ready`（见 §3.3）。
-- 拆掉本地残留：那个 fix 还活着的时候，把 chat `/cwd` 进它的 worktree 再跑 `/gtw close` —— 它删掉 worktree + branch，从 `cs.SelectedCwd()` 读 `.nightme/gtw.yml` 作为唯一真相来源。fix 已经 close 掉的话，worktree 早就没了，只剩 label 要人工摘。
+- 拆掉本地残留：那个 fix 还活着的时候，把 chat `/cwd` 进它的 worktree 再跑 `/gtw close` —— 它删掉 worktree + branch，从 `cs.SelectedCwd()` 读 `.nightme/gtw.yml` 作为唯一真相来源。默认的 close 不动 tracker，所以拆完之后 issue 上的 `nightme/wip` 还挂着，要人工在 issue 页面上摘；fix 已经 close 掉的话，worktree 早就没了，只剩 label 要人工摘。
 
 其它状态 label 用另一张卡 —— claim 的说法（「另一个 `/gtw fix` 持着它」）对它们不成立：
 
@@ -308,21 +308,23 @@ claim 保留自己的措辞：
 
 **PR 侧只加一个 label**：加 `nightme/ready`，不摘任何 label —— PR 上从来没有 `nightme/wip`。PR 的编号已知就用它（新开出来的 PR 从 URL 读，gate 2 发现的老 PR 用它的编号），编号未知就查这个分支上开着的 PR。
 
-**这里摘的只有状态 label**：队列标记 `nightme/assigned` 留在 issue 上，`/gtw fix` 不摘任何 label，`/gtw close` 也不摘它 —— 只有 `/gtw assign --remove` 摘。
+**这里摘的只有状态 label**：队列标记 `nightme/assigned` 留在 issue 上，`/gtw fix` 不摘任何 label，`/gtw close --done` 也不摘它 —— 只有 `/gtw assign --remove` 摘。
 
 **失败只警告**：PR 已经开出来了，label 是记账。label 调用失败时卡片上带一行 `⚠️`，命令的结论不变。issue 侧和 PR 侧互不阻断：一边失败不妨碍另一边执行。worktree 没有关联 issue（`issue <= 0`）时 issue 侧带一行 `⚠️`（说明 issue 的 label 没动），PR 侧照常贴 label。
 
-`/gtw close` 会摘状态 label —— 默认把 `nightme/wip`、`nightme/ready` 都摘掉，贴上 `nightme/done`；`--reset` 只摘不贴。close 收的是这一轮 fix 的本地会话，PR 还开不开着不改变它把 issue 标成「做完了」这件事。
+**`/gtw close` 默认不动 tracker**：它只拆这一轮 fix 的本地会话（worktree、分支、chat 的 cwd），issue 和 PR 上的标签原样保留，也不发起任何平台调用 —— 结束本地会话不说明活儿做完了，写错的 tracker 状态比不写更贵。
 
-`/gtw close` 同时收尾 PR 上的 label：把它上面除 `nightme/assigned` 以外的 `nightme/*` 全部摘掉，只摘不贴 —— PR 的完成状态由平台上的 merged 表达。查询不限状态（close 的正常时机在 merge 之后，merged 的 PR 已经不在 open 里）。分支没开过 PR 时不做任何事，也不告警。
+**`/gtw close --done` 才收尾 tracker**：issue 侧把 `nightme/wip`、`nightme/ready` 等状态 label 都摘掉，贴上 `nightme/done`（队列标记 `nightme/assigned` 留着）；PR 侧把它上面除 `nightme/assigned` 以外的 `nightme/*` 全部摘掉，只摘不贴 —— PR 的完成状态由平台上的 merged 表达。查询不限状态（close 的正常时机在 merge 之后，merged 的 PR 已经不在 open 里）。分支没开过 PR 时不做任何事，也不告警。
 
-**PR 的编号在拆本地之前取**：编号先从这个工作区的 PR 缓存里读 —— `/gtw pr` 开完 PR 就把它写进了缓存，而缓存里的 PR 只有在属于要关的那个分支、而且属于同一个仓库时才算数；缓存没有再问平台，问到了写回缓存（这样下一次 close 不用再问一遍）。取编号必须赶在本地拆除之前：分支删掉之后平台就查不到这个 PR 了。
+**PR 的标签只在 `--done` 时摘**：PR 还开着，它身上的 `nightme/ready` 没说谎 —— 摘掉它等于宣称这个 PR 不再等 review。
 
-**close 期间 provider 的 CLI 跑在仓库根目录**，不在 worktree 里 —— 拆除之后 worktree 没了，绑在它上面的 CLI 起不来；而它报出来的「no such file or directory」指的是二进制，读起来像是 CLI 没装。
+**`--done` 的 PR 编号在拆本地之前取**：编号先从这个工作区的 PR 缓存里读 —— `/gtw pr` 开完 PR 就把它写进了缓存，而缓存里的 PR 只有在属于要关的那个分支、而且属于同一个仓库时才算数；缓存没有再问平台，问到了写回缓存（这样下一次 close 不用再问一遍）。取编号必须赶在本地拆除之前：分支删掉之后平台就查不到这个 PR 了。
 
-**PR 侧的 label 摘除排在 worktree 删除之后**：编号已经取到了，摘 label 只需要编号。但它排在 worktree 删除之后，所以 close 在脏 worktree、或者 worktree 删除失败时中止（那条路径把 issue 的 label 还原）不会动到 PR —— PR 侧因此不需要还原，中止的 close 让 PR 保持原样。
+**`--done` 期间 provider 的 CLI 跑在仓库根目录**，不在 worktree 里 —— 拆除之后 worktree 没了，绑在它上面的 CLI 起不来；而它报出来的「no such file or directory」指的是二进制，读起来像是 CLI 没装。
 
-**PR 侧失败只警告**：PR 上的 label 是记账，没有任何逻辑读它，所以摘不掉也只给一行 `⚠️`，close 的本地清理照常跑完。摘不掉的 label 在卡片上用 `!` 标出 —— 它还在 PR 上，不和摘掉的 label 混在一列。这跟 issue 侧相反 —— issue 的 label 是队列状态的来源，它摘不掉就必须中止 close，否则 worktree 和分支被拆掉之后无法恢复。
+**`--done` 的 PR 侧 label 摘除排在 worktree 删除之后**：编号已经取到了，摘 label 只需要编号。但它排在 worktree 删除之后，所以 close 在脏 worktree、或者 worktree 删除失败时中止（那条路径把 issue 的 label 还原）不会动到 PR —— PR 侧因此不需要还原，中止的 close 让 PR 保持原样。
+
+**`--done` 的 PR 侧失败只警告**：PR 上的 label 是记账，没有任何逻辑读它，所以摘不掉也只给一行 `⚠️`，close 的本地清理照常跑完。摘不掉的 label 在卡片上用 `!` 标出 —— 它还在 PR 上，不和摘掉的 label 混在一列。这跟 issue 侧相反 —— issue 的 label 是队列状态的来源，它摘不掉就必须中止 close，否则 worktree 和分支被拆掉之后无法恢复。
 
 ### 3.4 gtw 职责边界（dispatch 之后）
 

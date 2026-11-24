@@ -1,10 +1,10 @@
 package gtw
 
-// Tests for the label finalization step of /gtw close: the issue's
-// `nightme/*` labels are finalised on close (or cleared with
-// `--reset`), the queue marker is never touched, a platform failure
-// leaves the local state intact, and a failed local step puts the
-// labels back.
+// Tests for the label finalization step of /gtw close: the default
+// close leaves the issue's `nightme/*` labels alone, the `--done`
+// close finalises them, the queue marker is never touched, a
+// platform failure leaves the local state intact, and a failed local
+// step puts the labels back.
 
 import (
 	"context"
@@ -49,7 +49,77 @@ func assertLabels(t *testing.T, prov *fakeGitProvider, want ...string) {
 	}
 }
 
-// TestRunClose_ModeRemote_FinalizesLabels pins the default close:
+// TestRunClose_ModeRemote_DefaultTouchesNoLabel pins the default
+// close: the issue's labels are exactly what they were — the claim
+// stays, a `nightme/done` from an earlier cycle stays — and the
+// close asks the platform for nothing at all. Ending the local
+// session says nothing about the work being finished, so the tracker
+// state is left to the human.
+func TestRunClose_ModeRemote_DefaultTouchesNoLabel(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	seedFixRemote(t, rig, prov, wt, repoRoot)
+	seedRemoteLabels(t, prov, LabelAssigned, LabelWIP, LabelDone)
+
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+
+	// The labels are untouched.
+	assertLabels(t, prov, LabelAssigned, LabelWIP, LabelDone)
+
+	// Not one provider method ran.
+	if calls := prov.Calls(); len(calls) != 0 {
+		t.Errorf("provider calls = %+v, want none (the default close does not reach the tracker)", calls)
+	}
+
+	// The local teardown still happened.
+	if got := rig.cs.SelectedCwd(); got != repoRoot {
+		t.Errorf("SelectedCwd = %q, want %q", got, repoRoot)
+	}
+}
+
+// TestRunClose_ModeRemote_DefaultSurvivesAnUnreachablePlatform pins
+// the offline promise of the default close: with the tracker
+// unreachable (expired auth, no network) the local session is torn
+// down all the same, and no platform failure surfaces.
+func TestRunClose_ModeRemote_DefaultSurvivesAnUnreachablePlatform(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	seedFixRemote(t, rig, prov, wt, repoRoot)
+	seedRemoteLabels(t, prov, LabelAssigned, LabelWIP)
+
+	// The tracker is unreachable: the provider detection fails and
+	// the repository has no origin remote.
+	rig.deps.Detect = func(context.Context, string, HTTPProber, string) (GitProvider, error) {
+		return nil, errors.New("git host unreachable")
+	}
+	rig.git.remoteURLResp = ""
+
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+
+	if got := rig.cs.SelectedCwd(); got != repoRoot {
+		t.Errorf("SelectedCwd = %q, want %q (the local session is torn down)", got, repoRoot)
+	}
+	card := rig.rec.lastText()
+	if !strings.Contains(card, "closed") {
+		t.Errorf("reply must report the close:\n%s", card)
+	}
+	if strings.Contains(card, "⚠️") {
+		t.Errorf("reply must not warn about a platform the close never called:\n%s", card)
+	}
+	assertLabels(t, prov, LabelAssigned, LabelWIP)
+}
+
+// TestRunClose_ModeRemote_FinalizesLabels pins the `--done` close:
 // every `nightme/*` label but the queue marker comes off the issue
 // and `nightme/done` goes on. The removal set comes from the
 // issue's own labels — a hand-made `Nightme/Custom` is a nightme
@@ -63,7 +133,7 @@ func TestRunClose_ModeRemote_FinalizesLabels(t *testing.T) {
 	seedFixRemote(t, rig, prov, wt, repoRoot)
 	seedRemoteLabels(t, prov, LabelWIP, LabelReady, "Nightme/Custom", "bug")
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -77,49 +147,17 @@ func TestRunClose_ModeRemote_FinalizesLabels(t *testing.T) {
 	}
 }
 
-// TestRunClose_ModeRemote_ResetClearsWithoutDone pins `--reset`:
-// the state labels come off, nothing goes on, and the rest of the
-// close (worktree, branch, cwd) is unchanged.
-func TestRunClose_ModeRemote_ResetClearsWithoutDone(t *testing.T) {
-	wt := t.TempDir()
-	repoRoot := t.TempDir()
-
-	rig := newCloseRig(t)
-	prov := newFakeGitProvider(ProviderGitHub, "github.com")
-	seedFixRemote(t, rig, prov, wt, repoRoot)
-	seedRemoteLabels(t, prov, LabelWIP, "bug")
-
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
-		t.Fatalf("RunClose: %v", err)
-	}
-
-	assertLabels(t, prov, "bug")
-
-	// No label was added — the card lists the removals only.
-	if n := len(prov.CallsByMethod("AddIssueLabel")); n != 0 {
-		t.Errorf("AddIssueLabel calls = %d, want 0 (the reset mode marks nothing)", n)
-	}
-	card := rig.rec.lastText()
-	want := "→ issue: cnlangzi/nightme#42 -" + LabelWIP
-	if !strings.Contains(card, want) {
-		t.Errorf("card missing %q:\n%s", want, card)
-	}
-	if strings.Contains(card, "+"+LabelDone) {
-		t.Errorf("card must not report an added label:\n%s", card)
-	}
-}
-
 // TestRunClose_ModeRemote_QueueMarkerUntouched pins that the queue
 // marker survives the close in both modes — it is the user's label,
 // not the close's.
 func TestRunClose_ModeRemote_QueueMarkerUntouched(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		reset bool
-		want  []string
+		name string
+		done bool
+		want []string
 	}{
-		{"default", false, []string{LabelAssigned, LabelDone}},
-		{"reset", true, []string{LabelAssigned}},
+		{"default", false, []string{LabelAssigned, LabelWIP}},
+		{"done", true, []string{LabelAssigned, LabelDone}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			wt := t.TempDir()
@@ -130,7 +168,7 @@ func TestRunClose_ModeRemote_QueueMarkerUntouched(t *testing.T) {
 			seedFixRemote(t, rig, prov, wt, repoRoot)
 			seedRemoteLabels(t, prov, LabelAssigned, LabelWIP)
 
-			if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", tc.reset); err != nil {
+			if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", tc.done); err != nil {
 				t.Fatalf("RunClose: %v", err)
 			}
 
@@ -152,7 +190,7 @@ func TestRunClose_ModeRemote_AddFailureAbortsBeforeRemoval(t *testing.T) {
 	seedRemoteLabels(t, prov, LabelAssigned, LabelWIP)
 	prov.SetAddIssueLabelErr(errors.New("403 Forbidden: missing write scope"))
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -193,7 +231,7 @@ func TestRunClose_ModeRemote_RemoveFailureAbortsClose(t *testing.T) {
 	seedRemoteLabels(t, prov, LabelAssigned, LabelWIP)
 	prov.SetRemoveIssueLabelErr(errors.New("403 Forbidden: missing write scope"))
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -226,7 +264,7 @@ func TestRunClose_ModeRemote_IssueNotFound_WarnsAndContinues(t *testing.T) {
 	seedFixRemote(t, rig, prov, wt, repoRoot)
 	prov.SetGetIssueErr(42, fmt.Errorf("%w: issue 42 is gone", ErrIssueNotFound))
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -281,7 +319,7 @@ func TestRunClose_ModeRemote_LocalFailureRestoresLabels(t *testing.T) {
 	seedRemoteLabels(t, prov, LabelAssigned, LabelWIP)
 	rig.git.worktreeRemoveErr = &fakeExitError{code: 128, msg: "worktree remove failed"}
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -316,7 +354,7 @@ func TestRunClose_ModeRemote_CompensationFailureIsReported(t *testing.T) {
 		return nil
 	})
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -335,10 +373,10 @@ func TestRunClose_ModeRemote_CompensationFailureIsReported(t *testing.T) {
 }
 
 // TestRunClose_ModeLocal_NoLabelCall pins that a local fix has no
-// issue to label: the close makes no platform call at all, with or
-// without `--reset`.
+// issue to label: the close makes no platform call at all, in either
+// mode.
 func TestRunClose_ModeLocal_NoLabelCall(t *testing.T) {
-	for _, reset := range []bool{false, true} {
+	for _, done := range []bool{false, true} {
 		wt := t.TempDir()
 		repoRoot := t.TempDir()
 
@@ -347,7 +385,7 @@ func TestRunClose_ModeLocal_NoLabelCall(t *testing.T) {
 		rig.deps.Detect = fakeDetect(prov)
 		seedFix(t, rig, wt, repoRoot)
 
-		if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", reset); err != nil {
+		if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", done); err != nil {
 			t.Fatalf("RunClose: %v", err)
 		}
 
@@ -361,10 +399,11 @@ func TestRunClose_ModeLocal_NoLabelCall(t *testing.T) {
 	}
 }
 
-// TestRunClose_ModeRemote_NoNightmeLabels_CardSaysSo pins the card
-// variant for an issue that carries no nightme label at all: the
-// reset mode has nothing to remove, and the card says so.
-func TestRunClose_ModeRemote_NoNightmeLabels_CardSaysSo(t *testing.T) {
+// TestRunClose_ModeRemote_NoNightmeLabels_DoneStillGoesOn pins that
+// the `--done` close marks the work done even when the issue carried
+// no nightme label at all: there is nothing to take off, and the
+// card says what went on.
+func TestRunClose_ModeRemote_NoNightmeLabels_DoneStillGoesOn(t *testing.T) {
 	wt := t.TempDir()
 	repoRoot := t.TempDir()
 
@@ -377,14 +416,15 @@ func TestRunClose_ModeRemote_NoNightmeLabels_CardSaysSo(t *testing.T) {
 		t.Fatalf("RunClose: %v", err)
 	}
 
+	assertLabels(t, prov, LabelDone, "bug")
 	card := rig.rec.lastText()
-	if !strings.Contains(card, "→ issue: cnlangzi/nightme#42 no nightme/* labels") {
-		t.Errorf("card must say that no nightme label was there:\n%s", card)
+	if !strings.Contains(card, "→ issue: cnlangzi/nightme#42 +"+LabelDone) {
+		t.Errorf("card must report the label that went on:\n%s", card)
 	}
 }
 
 // TestRunClose_ModeRemote_StaleDoneStays pins that a stale
-// `nightme/done` (left by an earlier cycle) survives the default
+// `nightme/done` (left by an earlier cycle) survives the `--done`
 // close: the close puts the label on, so taking it off again would
 // undo the finalization.
 func TestRunClose_ModeRemote_StaleDoneStays(t *testing.T) {
@@ -396,7 +436,7 @@ func TestRunClose_ModeRemote_StaleDoneStays(t *testing.T) {
 	seedFixRemote(t, rig, prov, wt, repoRoot)
 	seedRemoteLabels(t, prov, LabelAssigned, LabelWIP, LabelDone)
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -415,7 +455,7 @@ func TestRunClose_ModeRemote_FinalizedIssueLeavesTheQueue(t *testing.T) {
 	seedFixRemote(t, rig, prov, wt, repoRoot)
 	seedRemoteLabels(t, prov, LabelAssigned, LabelWIP)
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -429,37 +469,6 @@ func TestRunClose_ModeRemote_FinalizedIssueLeavesTheQueue(t *testing.T) {
 	}
 	if held != 1 {
 		t.Errorf("held = %d, want 1 (the closed issue carries the done marker)", held)
-	}
-}
-
-// TestRunClose_ModeRemote_ResetReturnsTheIssueToTheQueue pins the
-// consequence of leaving the queue marker alone: a reset close
-// takes the state labels off and marks nothing done, so the issue
-// carries the queue marker alone — and the automatic pick offers it
-// again. Dropping the work puts it back in the queue.
-func TestRunClose_ModeRemote_ResetReturnsTheIssueToTheQueue(t *testing.T) {
-	wt := t.TempDir()
-	repoRoot := t.TempDir()
-
-	rig := newCloseRig(t)
-	prov := newFakeGitProvider(ProviderGitHub, "github.com")
-	seedFixRemote(t, rig, prov, wt, repoRoot)
-	seedRemoteLabels(t, prov, LabelAssigned, LabelWIP)
-
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
-		t.Fatalf("RunClose: %v", err)
-	}
-
-	issues, err := prov.ListIssues(context.Background(), "cnlangzi", "nightme")
-	if err != nil {
-		t.Fatalf("ListIssues: %v", err)
-	}
-	cands, held := assignedCandidates(issues)
-	if len(cands) != 1 {
-		t.Errorf("candidates = %+v, want the reset issue back in the queue", cands)
-	}
-	if held != 0 {
-		t.Errorf("held = %d, want 0 (the reset issue carries no state label)", held)
 	}
 }
 
@@ -477,7 +486,7 @@ func TestRunClose_ModeRemote_RestoreKeepsAPreexistingDone(t *testing.T) {
 	seedRemoteLabels(t, prov, LabelAssigned, LabelWIP, LabelDone)
 	rig.git.worktreeRemoveErr = &fakeExitError{code: 128, msg: "worktree remove failed"}
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", true); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -485,37 +494,45 @@ func TestRunClose_ModeRemote_RestoreKeepsAPreexistingDone(t *testing.T) {
 	assertLabels(t, prov, LabelAssigned, LabelWIP, LabelDone)
 }
 
-// --- the `--reset` flag on the command line ---
+// --- the `--done` flag on the command line ---
 
-// TestCloseCmdSpec pins the argv grammar: `--reset` is a boolean
+// TestCloseCmdSpec pins the argv grammar: `--done` is a boolean
 // flag, and anything else in the tail is rejected.
 func TestCloseCmdSpec(t *testing.T) {
-	parsed, err := command.ParseCmdArgs([]string{"--reset"}, closeCmdSpec)
+	parsed, err := command.ParseCmdArgs([]string{"--done"}, closeCmdSpec)
 	if err != nil {
-		t.Fatalf("ParseCmdArgs(--reset): %v", err)
+		t.Fatalf("ParseCmdArgs(--done): %v", err)
 	}
-	if !parsed.Bool("reset") {
-		t.Error("reset = false, want true")
+	if !parsed.Bool("done") {
+		t.Error("done = false, want true")
+	}
+
+	// `--done` is the only flag the close knows.
+	if len(closeCmdSpec.Flags) != 1 {
+		t.Errorf("closeCmdSpec flags = %+v, want only --done", closeCmdSpec.Flags)
+	}
+	if _, ok := closeCmdSpec.Flags["--reset"]; ok {
+		t.Error("closeCmdSpec still knows --reset")
 	}
 
 	for _, argv := range [][]string{
 		{"--force"},
 		{"-r"},
 		{"extra"},
-		{"--reset", "extra"},
+		{"--done", "extra"},
 	} {
 		if _, err := command.ParseCmdArgs(argv, closeCmdSpec); err == nil {
 			t.Errorf("ParseCmdArgs(%q) = nil, want an error", argv)
-		} else if !strings.Contains(err.Error(), "Usage: /gtw close [--reset]") {
+		} else if !strings.Contains(err.Error(), "Usage: /gtw close [--done]") {
 			t.Errorf("error lacks the usage tail: %q", err)
 		}
 	}
 }
 
-// TestFactory_Handle_Close_ResetReachesRunClose pins that the flag
-// survives the dispatch: `/gtw close --reset` clears the issue's
-// state labels and marks nothing done.
-func TestFactory_Handle_Close_ResetReachesRunClose(t *testing.T) {
+// TestFactory_Handle_Close_DoneReachesRunClose pins that the flag
+// survives the dispatch: `/gtw close --done` finalises the issue's
+// state labels and marks the work done.
+func TestFactory_Handle_Close_DoneReachesRunClose(t *testing.T) {
 	wt := t.TempDir()
 	repoRoot := t.TempDir()
 
@@ -528,8 +545,8 @@ func TestFactory_Handle_Close_ResetReachesRunClose(t *testing.T) {
 	got, err := f.Handle(context.Background(), command.RuntimeServices{},
 		nil, rig.cs,
 		command.SlashInput{
-			Text:      "/gtw close --reset",
-			Args:      []string{"gtw", "close", "--reset"},
+			Text:      "/gtw close --done",
+			Args:      []string{"gtw", "close", "--done"},
 			ChatID:    rig.cs.ChatID,
 			MessageID: "msg-1",
 		})
@@ -540,5 +557,68 @@ func TestFactory_Handle_Close_ResetReachesRunClose(t *testing.T) {
 		t.Errorf("expected Consumed, got %+v", got)
 	}
 
-	assertLabels(t, prov, LabelAssigned)
+	assertLabels(t, prov, LabelAssigned, LabelDone)
+}
+
+// TestFactory_Handle_Close_ResetIsRejected pins that the removed
+// `--reset` gets its own answer: the reply names what to write
+// instead, and nothing is torn down — no worktree, no branch, no
+// label.
+//
+// The dash family counts too: a phone keyboard types an em dash for
+// the ASCII hyphen, and the lexer folds it onto the same flag — the
+// spelling worked before the flag was removed, so it has to reach the
+// migration hint as well.
+func TestFactory_Handle_Close_ResetIsRejected(t *testing.T) {
+	for _, spelling := range []string{"--reset", "—reset"} {
+		t.Run(spelling, func(t *testing.T) {
+			wt := t.TempDir()
+			repoRoot := t.TempDir()
+
+			rig := newCloseRig(t)
+			prov := newFakeGitProvider(ProviderGitHub, "github.com")
+			seedFixRemote(t, rig, prov, wt, repoRoot)
+			seedRemoteLabels(t, prov, LabelAssigned, LabelWIP)
+
+			f := NewFactoryWithDeps(NewManager(), rig.deps)
+			got, err := f.Handle(context.Background(), command.RuntimeServices{},
+				nil, rig.cs,
+				command.SlashInput{
+					Text:      "/gtw close " + spelling,
+					Args:      []string{"gtw", "close", spelling},
+					ChatID:    rig.cs.ChatID,
+					MessageID: "msg-1",
+				})
+			if err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if !got.Consumed {
+				t.Errorf("expected Consumed, got %+v", got)
+			}
+
+			if !strings.HasPrefix(got.Reply, "❌ ") {
+				t.Errorf("reply must start with the failure marker:\n%s", got.Reply)
+			}
+			for _, want := range []string{"--reset", "no longer exists", "--done"} {
+				if !strings.Contains(got.Reply, want) {
+					t.Errorf("reply missing %q:\n%s", want, got.Reply)
+				}
+			}
+
+			// Nothing was torn down: the worktree, the branch, the yml
+			// and the issue's labels are all where they were.
+			if cwd := rig.cs.SelectedCwd(); cwd != wt {
+				t.Errorf("SelectedCwd = %q, want %q (nothing torn down)", cwd, wt)
+			}
+			for _, args := range rig.git.calls {
+				if len(args) >= 2 && args[0] == "worktree" && args[1] == "remove" {
+					t.Errorf("git worktree remove called despite the rejected flag: %v", args)
+				}
+				if len(args) >= 3 && args[0] == "branch" && args[1] == "-D" {
+					t.Errorf("git branch -D called despite the rejected flag: %v", args)
+				}
+			}
+			assertLabels(t, prov, LabelAssigned, LabelWIP)
+		})
+	}
 }

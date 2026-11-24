@@ -564,52 +564,61 @@ func TestFactory_Handle_Close_DoneReachesRunClose(t *testing.T) {
 // `--reset` gets its own answer: the reply names what to write
 // instead, and nothing is torn down — no worktree, no branch, no
 // label.
+//
+// The dash family counts too: a phone keyboard types an em dash for
+// the ASCII hyphen, and the lexer folds it onto the same flag — the
+// spelling worked before the flag was removed, so it has to reach the
+// migration hint as well.
 func TestFactory_Handle_Close_ResetIsRejected(t *testing.T) {
-	wt := t.TempDir()
-	repoRoot := t.TempDir()
+	for _, spelling := range []string{"--reset", "—reset"} {
+		t.Run(spelling, func(t *testing.T) {
+			wt := t.TempDir()
+			repoRoot := t.TempDir()
 
-	rig := newCloseRig(t)
-	prov := newFakeGitProvider(ProviderGitHub, "github.com")
-	seedFixRemote(t, rig, prov, wt, repoRoot)
-	seedRemoteLabels(t, prov, LabelAssigned, LabelWIP)
+			rig := newCloseRig(t)
+			prov := newFakeGitProvider(ProviderGitHub, "github.com")
+			seedFixRemote(t, rig, prov, wt, repoRoot)
+			seedRemoteLabels(t, prov, LabelAssigned, LabelWIP)
 
-	f := NewFactoryWithDeps(NewManager(), rig.deps)
-	got, err := f.Handle(context.Background(), command.RuntimeServices{},
-		nil, rig.cs,
-		command.SlashInput{
-			Text:      "/gtw close --reset",
-			Args:      []string{"gtw", "close", "--reset"},
-			ChatID:    rig.cs.ChatID,
-			MessageID: "msg-1",
+			f := NewFactoryWithDeps(NewManager(), rig.deps)
+			got, err := f.Handle(context.Background(), command.RuntimeServices{},
+				nil, rig.cs,
+				command.SlashInput{
+					Text:      "/gtw close " + spelling,
+					Args:      []string{"gtw", "close", spelling},
+					ChatID:    rig.cs.ChatID,
+					MessageID: "msg-1",
+				})
+			if err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if !got.Consumed {
+				t.Errorf("expected Consumed, got %+v", got)
+			}
+
+			if !strings.HasPrefix(got.Reply, "❌ ") {
+				t.Errorf("reply must start with the failure marker:\n%s", got.Reply)
+			}
+			for _, want := range []string{"--reset", "no longer exists", "--done"} {
+				if !strings.Contains(got.Reply, want) {
+					t.Errorf("reply missing %q:\n%s", want, got.Reply)
+				}
+			}
+
+			// Nothing was torn down: the worktree, the branch, the yml
+			// and the issue's labels are all where they were.
+			if cwd := rig.cs.SelectedCwd(); cwd != wt {
+				t.Errorf("SelectedCwd = %q, want %q (nothing torn down)", cwd, wt)
+			}
+			for _, args := range rig.git.calls {
+				if len(args) >= 2 && args[0] == "worktree" && args[1] == "remove" {
+					t.Errorf("git worktree remove called despite the rejected flag: %v", args)
+				}
+				if len(args) >= 3 && args[0] == "branch" && args[1] == "-D" {
+					t.Errorf("git branch -D called despite the rejected flag: %v", args)
+				}
+			}
+			assertLabels(t, prov, LabelAssigned, LabelWIP)
 		})
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
 	}
-	if !got.Consumed {
-		t.Errorf("expected Consumed, got %+v", got)
-	}
-
-	if !strings.HasPrefix(got.Reply, "❌ ") {
-		t.Errorf("reply must start with the failure marker:\n%s", got.Reply)
-	}
-	for _, want := range []string{"--reset", "no longer exists", "--done"} {
-		if !strings.Contains(got.Reply, want) {
-			t.Errorf("reply missing %q:\n%s", want, got.Reply)
-		}
-	}
-
-	// Nothing was torn down: the worktree, the branch, the yml and
-	// the issue's labels are all where they were.
-	if cwd := rig.cs.SelectedCwd(); cwd != wt {
-		t.Errorf("SelectedCwd = %q, want %q (nothing torn down)", cwd, wt)
-	}
-	for _, args := range rig.git.calls {
-		if len(args) >= 2 && args[0] == "worktree" && args[1] == "remove" {
-			t.Errorf("git worktree remove called despite the rejected flag: %v", args)
-		}
-		if len(args) >= 3 && args[0] == "branch" && args[1] == "-D" {
-			t.Errorf("git branch -D called despite the rejected flag: %v", args)
-		}
-	}
-	assertLabels(t, prov, LabelAssigned, LabelWIP)
 }

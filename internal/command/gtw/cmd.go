@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -914,7 +913,14 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *c
 	// tracker at all, so the flag has no counterpart left — naming
 	// `--done` says what to write instead, which the lexer's
 	// "unknown flag" does not.
-	if slices.Contains(input.Args[2:], "--reset") {
+	//
+	// The check goes through the lexer's own folding (IsFlag): a
+	// dash glyph a phone keyboard types ("—reset") names the same
+	// flag, and it used to work.
+	for _, tok := range input.Args[2:] {
+		if !command.IsFlag(tok, "--reset") {
+			continue
+		}
 		reportOutcome(ctx, command.FailedOutcome(http.StatusBadRequest, "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply: "❌ `/gtw close --reset` no longer exists — the default `/gtw close` leaves " +

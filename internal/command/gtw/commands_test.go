@@ -335,7 +335,7 @@ func TestFactory_Handle_UnknownSubcommandReleasesLock(t *testing.T) {
 // directly (no gtw-side helper), so the lexer contract is
 // pinned here using the same literal form.
 //
-// /gtw close carries one flag of its own — `--reset` — so its
+// /gtw close carries one flag of its own — `--done` — so its
 // spec is the gtw-side one; /gtw sync takes none.
 func TestGtwSubcommandNoArgs(t *testing.T) {
 	specs := []struct {

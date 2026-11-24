@@ -49,6 +49,10 @@ func waitPaused(t *testing.T, svc *Service, chatID string) *run {
 
 // TestBudget_TheRunPausesWhenTheStepSpentItsBudget — the budget of a
 // step is spent: the run waits for a human and keeps its place.
+//
+// The card of the decision is on the screen: the run publishes no
+// state of its own, and the reason of the pause reaches the operator
+// in the chat.
 func TestBudget_TheRunPausesWhenTheStepSpentItsBudget(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", budgetWorkflow)
@@ -73,33 +77,27 @@ func TestBudget_TheRunPausesWhenTheStepSpentItsBudget(t *testing.T) {
 	if phase := r.currentPhase(); phase != PhasePaused {
 		t.Fatalf("the run stands at %q, want %q", phase, PhasePaused)
 	}
-	waitEntry(t, op, "paused:")
-	// The state of the run hangs under the card of the round.
+	// The round keeps the card it has.
 	round := r.roundSessionRef()
 	if round == nil {
 		t.Fatal("the run has no card of the round")
 	}
-	waitForStateUnder(t, op, round.anchor, 4)
-	var named bool
-	for _, entry := range op.Entries(round.anchor) {
-		if strings.Contains(entry, `the step "commit" used up its budget (2 of 2 chances)`) {
-			named = true
-		}
-	}
-	if !named {
-		t.Errorf("the card does not name the step and its chances: %v", op.Entries(round.anchor))
-	}
 
-	// The chat is told once that the run waits for a human.
+	// The chat is told once that the run waits for a human, and why.
 	waitSpoken(t, op, "The run paused")
+	var notice string
 	var notices int
 	for _, msg := range op.Spoken() {
 		if strings.Contains(msg.Text, "The run paused") {
 			notices++
+			notice = msg.Text
 		}
 	}
 	if notices != 1 {
 		t.Errorf("the chat got %d notices about the pause, want 1: %v", notices, op.Spoken())
+	}
+	if !strings.Contains(notice, `the step "commit" used up its budget (2 of 2 chances)`) {
+		t.Errorf("the notice does not name the step and its chances: %q", notice)
 	}
 }
 

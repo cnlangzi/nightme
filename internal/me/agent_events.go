@@ -89,6 +89,21 @@ func usageInfo(usage llm.Usage) *messages.UsageInfo {
 	}
 }
 
+// recordWake records a decision of a model and publishes it on the
+// card of the decision that is open.
+//
+// The card is the record of the judgment: every decision the models
+// make lands on it, so the operator reads what was decided on the card
+// of the step.
+func (s *Service) recordWake(ctx context.Context, r *run, rec wakeRecord) {
+	r.recordWake(rec)
+	sess := r.decisionSessionRef()
+	if sess == nil {
+		return
+	}
+	s.publishReply(ctx, r, sess, rec.Who+" — "+rec.What)
+}
+
 // recordReply publishes what the chat model said.
 //
 // The words are the decision's own: they go on the decision's card,

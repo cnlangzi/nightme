@@ -13,11 +13,15 @@
 // anchor is the message that started the run, and the chat folds the
 // run's entries into the card it already holds for that message.
 //
-// A decision and the state of the run post a placeholder of their
-// own: the chat renders the session onto the card of that message.
-// The card of the state is the latest card of the round: the run goes
-// on with it. The state the operator asks for lands on the card of the
-// command's own message instead.
+// A decision opens a card of its own the same way a round does: the
+// line that says the agent takes the workflow over is the first entry
+// of the card, and every judgment of that step lands on it.
+//
+// The state of the run posts a placeholder of its own: the chat
+// renders the session onto the card of that message. The card of the
+// state is the latest card of the round: the run goes on with it. The
+// state the operator asks for lands on the card of the command's own
+// message instead.
 //
 // The package speaks the standard outbound vocabulary
 // (internal/messages), and the chat renders it. The blocks the run
@@ -51,8 +55,8 @@ const (
 	// sessionRound is the session of one round of one job: the round
 	// opens its own card.
 	sessionRound sessionKind = "round"
-	// sessionDecision is the session of one decision: its card hangs
-	// under the command message of the step the decision is about.
+	// sessionDecision is the session of one decision: the card of a
+	// decision is the card of the step the decision is about.
 	sessionDecision sessionKind = "decision"
 	// sessionRecord is the session of the record a finished run
 	// leaves behind: it rides on the card of the run, or on the card
@@ -82,17 +86,25 @@ type session struct {
 	// empty for the sessions that are not about a round.
 	job   string
 	round int
+	// step is the step the card of a decision is about. It is empty
+	// for the sessions that are not about a step.
+	step string
+	// reason is the reason the decision was taken. The reason is
+	// published once: a judgment that comes to the same reason again
+	// adds nothing to the card.
+	reason string
 }
 
-// The lines the placeholders carry.
+// decisionLine is what the takeover of the workflow says.
+//
+// The line opens the card of the decision: the chat renders the
+// decision onto the card of that entry.
+const decisionLine = "NightMe is taking over the workflow"
+
+// stateLine is what the placeholder of the state of the run says.
 //
 // A placeholder says in one line what the card below it is about.
-const (
-	// decisionLine is what the placeholder of a decision says.
-	decisionLine = "the agent is deciding…"
-	// stateLine is what the placeholder of the state of the run says.
-	stateLine = "the run is reporting its state…"
-)
+const stateLine = "the run is reporting its state…"
 
 // placeholder posts the placeholder message of a session and returns
 // the session.
@@ -187,6 +199,24 @@ func (s *Service) showState(ctx context.Context, r *run) {
 	s.answerCommand(ctx, r, "", "")
 }
 
+// showStateOnPause publishes the state of the run when it stops by
+// itself.
+//
+// A card of the decision is open: the run stops on the card of the
+// step it was judged at, and a card of its own would say the same
+// thing twice. The round keeps the card it has.
+//
+// The card of a decision stays open until the run judges another step,
+// so a pause that comes later publishes no state card either. The
+// operator asks for the state with `/me status` whenever they want it:
+// that answer lands on the card of their own command.
+func (s *Service) showStateOnPause(ctx context.Context, r *run) {
+	if r.decisionSessionRef() != nil {
+		return
+	}
+	s.showState(ctx, r)
+}
+
 // stateSession builds the session the state of the run is published in.
 //
 // The state rides in the session of the round the run is in: the card of
@@ -248,32 +278,67 @@ func (s *Service) publishState(ctx context.Context, r *run, sess *session, it it
 
 // openDecisionSession opens the session of a decision.
 //
-// The card hangs under the command message of the step the decision
-// is about, so the decision reads directly after the error it
-// answers. A decision about a step that never sent a command to the
-// chat hangs under the round's card instead.
+// The card of a decision belongs to the step the decision is about: a
+// step that is judged again in a row goes on with the card it has. A
+// judgment about another step ends that card — the verdict rides in
+// its footer — and a step the run comes back to opens a card of its
+// own: one card belongs to one stretch of judgments.
 //
-// The session's first entry is the reason the decision was taken.
+// The step is the one the run is on (budgetStep): a judgment that
+// names no step falls back to the step the plan may run now, and then
+// to the step that ran last.
+//
+// The card is opened by the line that says the agent takes the
+// workflow over. The line goes out without an anchor, the chat answers
+// with the id of the card it wrote, and every entry of the decision
+// lands on that card from now on.
 func (s *Service) openDecisionSession(ctx context.Context, r *run) {
+	step := r.budgetStep()
+	if sess := r.decisionSessionRef(); sess != nil && sess.step == step {
+		// The step is judged again: the card of the step takes the
+		// judgment.
+		s.publishReason(ctx, r, sess)
+		return
+	}
 	// The decision that was open is over: its verdict rides in its own
 	// footer.
 	s.closeDecisionSession(ctx, r)
-	replyTo := r.decisionAnchor()
-	if replyTo == "" {
-		if roundSess := r.roundSessionRef(); roundSess != nil {
-			replyTo = roundSess.anchor
-		}
-	}
 	r.mu.Lock()
 	r.decisionCount++
 	id := fmt.Sprintf("decision-%d", r.decisionCount)
 	r.mu.Unlock()
 	r.resetDecisionUsage()
 
-	sess := s.placeholder(ctx, r, &session{kind: sessionDecision, id: id}, decisionLine, replyTo)
+	sess := &session{kind: sessionDecision, id: id, step: step}
+	sess.anchor = s.publishReply(ctx, r, sess, decisionTakeover(step))
 	r.setDecisionSession(sess)
 	s.publishInit(ctx, r, sess)
-	s.publishReply(ctx, r, sess, r.decisionReasonLine())
+	s.publishReason(ctx, r, sess)
+}
+
+// decisionTakeover renders the line that opens the card of a decision.
+//
+// The line names the step the agent takes over: the card is read on
+// its own, and the step says what the decision is about.
+func decisionTakeover(stepID string) string {
+	if stepID == "" {
+		return decisionLine
+	}
+	return decisionLine + " · " + stepID
+}
+
+// publishReason publishes why the decision was taken.
+//
+// The reason of a step is published once: a judgment that comes to the
+// same reason again adds nothing to the card. A reason that changed is
+// a new entry.
+func (s *Service) publishReason(ctx context.Context, r *run, sess *session) {
+	reason := r.decisionReasonLine()
+	if reason == "" || reason == sess.reason {
+		return
+	}
+	s.publishReply(ctx, r, sess, reason)
+	sess.reason = reason
 }
 
 // switchRoundSession moves the run to the session of the round it is
@@ -372,21 +437,6 @@ func (r *run) decisionVerdict() string {
 		return ""
 	}
 	return r.wakes[len(r.wakes)-1].What
-}
-
-// decisionAnchor returns the message the decision's card hangs under.
-//
-// It is the command message of the step the decision is about. A
-// decision that names no step, or a step that never sent a command to
-// the chat, has no anchor of its own.
-func (r *run) decisionAnchor() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	stepID := r.judgmentStep
-	if stepID == "" {
-		return ""
-	}
-	return r.commandMsgIDs[stepID]
 }
 
 // decisionReasonLine renders why the decision was taken.

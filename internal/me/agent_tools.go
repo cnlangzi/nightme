@@ -963,9 +963,7 @@ func (s *Service) pauseForRateLimit(ctx context.Context, r *run, res stepResult)
 		return
 	}
 	r.requestPause(rateLimitReason)
-	// The run stops: it publishes the state of the round on a card of
-	// its own.
-	s.showState(ctx, r)
+	s.showStateOnPause(ctx, r)
 	s.announcePause(ctx, r, rateLimitReason)
 }
 
@@ -1003,7 +1001,6 @@ func (s *Service) runCommandInner(ctx context.Context, r *run, command string, i
 			return stepResult{}, fmt.Errorf("the chat could not run %q: %w", command, err)
 		}
 		msgID = id
-		r.setLastCommandMsgID(msgID)
 		r.setInflight(&inflightState{MsgID: msgID, Command: command, Instruct: instruct})
 		// The state of the run goes to the chat right away: the
 		// command is in flight.

@@ -258,9 +258,7 @@ func (s *Service) pauseForBudget(ctx context.Context, r *run) {
 	reason := fmt.Sprintf("the step %q used up its budget (%d of %d chances) — the run waits for you",
 		stepID, used, limit)
 	r.pauseNow(reason)
-	// The run stops: it publishes the state of the round on a card of
-	// its own.
-	s.showState(ctx, r)
+	s.showStateOnPause(ctx, r)
 	s.refreshRun(r)
 	s.announcePause(ctx, r, reason)
 }
@@ -474,7 +472,7 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 		if err != nil {
 			return err
 		}
-		r.recordWake(wakeRecord{
+		s.recordWake(ctx, r, wakeRecord{
 			Who:  decisionDecider,
 			What: decisionWhat(dec),
 			Why:  r.judgmentReason(),
@@ -546,7 +544,7 @@ func (s *Service) system1(ctx context.Context, r *run) (sys1Action, error) {
 	if err != nil {
 		return sys1None, err
 	}
-	r.recordWake(wakeRecord{
+	s.recordWake(ctx, r, wakeRecord{
 		Who:  decisionDecider,
 		What: decisionWhat(dec),
 		Why:  r.judgmentReason(),

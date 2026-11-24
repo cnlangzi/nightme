@@ -79,7 +79,7 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 	// The turn is counted before the run's events leave it: a chat
 	// that hides them does not change what the run did.
 	r.countThink(s.now())
-	r.recordWake(wakeRecord{
+	s.recordWake(ctx, r, wakeRecord{
 		Who:  decisionChat,
 		What: toolCallsLine(resp.Message.ToolCalls()),
 		Why:  r.judgmentReason(),

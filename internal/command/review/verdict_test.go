@@ -3,13 +3,12 @@ package review
 // The verdict /review judges itself by.
 //
 // A review finds problems and hands them to the coding agent; the
-// fixes land in the turn the findings were injected into. The review
-// knows two facts: how many findings it collected, and what the
-// workspace holds once those findings were acted on.
+// review knows two facts: how many findings it collected, and what
+// the workspace holds once those findings were acted on.
 //
-// Nothing to fix is a normal result. Findings that were addressed are
-// a normal result too. Findings that were not addressed are an
-// exception: the review's work did not land.
+// A review that ran is a normal result. What came of the findings is
+// a fact — the `addressed` fact — and a turn that did not end cleanly
+// carries its own result, not a verdict about the findings.
 
 import (
 	"context"
@@ -25,6 +24,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/pkg/outcome"
 )
 
 // initGitRepo creates a throwaway git repository with one commit, so
@@ -70,26 +70,42 @@ func waitForInjection(t *testing.T, d *recordingDriver) {
 	t.Fatal("the findings never reached the agent")
 }
 
+// assertAddressed checks the `addressed` fact of an outcome. An empty
+// want means the key must not be there at all.
+func assertAddressed(t *testing.T, got *outcome.Outcome, want string) {
+	t.Helper()
+	if got == nil {
+		t.Fatal("no settled outcome: the review reported nothing")
+	}
+	if want == "" {
+		if _, ok := got.Data[BoolKeyAddressed]; ok {
+			t.Errorf("the outcome carries an %q fact: %v", BoolKeyAddressed, got)
+		}
+		return
+	}
+	if got.Data[BoolKeyAddressed] != want {
+		t.Errorf("outcome data[%q] = %q, want %q", BoolKeyAddressed, got.Data[BoolKeyAddressed], want)
+	}
+}
+
 // TestReviewContinueVerdict covers the continuation's judgment: the
 // findings it resumes are judged the same way a plain review's are.
 func TestReviewContinueVerdict(t *testing.T) {
 	cases := []struct {
 		name string
 		// fix makes the coding agent commit the fixes.
-		fix  bool
-		want int
-		// wantErr says the outcome must be an exception.
-		wantErr bool
+		fix bool
+		// addressed is the `addressed` fact the outcome must carry.
+		addressed string
 	}{
 		{
-			name: "the findings were fixed",
-			fix:  true,
-			want: http.StatusOK,
+			name:      "the findings were fixed",
+			fix:       true,
+			addressed: "true",
 		},
 		{
-			name:    "the findings were left unaddressed",
-			want:    http.StatusConflict,
-			wantErr: true,
+			name:      "the findings were left unaddressed",
+			addressed: "false",
 		},
 	}
 
@@ -144,48 +160,66 @@ func TestReviewContinueVerdict(t *testing.T) {
 			})
 
 			got := waitOutcome(t, em, 5*time.Second)
-			if got.Status != tc.want {
-				t.Fatalf("outcome status = %d, want %d (outcome %+v)", got.Status, tc.want, got)
-			}
-			if tc.wantErr {
-				if got.Success {
-					t.Errorf("an exception is not a success: %v", got)
-				}
-			} else if got.Exception() {
+			assertOutcome(t, got, http.StatusOK, map[string]string{"agent": "review-continue-verdict"})
+			assertAddressed(t, got, tc.addressed)
+			if got.Exception() {
 				t.Errorf("a normal result is not an exception: %v", got)
 			}
 		})
 	}
 }
 
-// TestReviewVerdict covers the three verdicts the review judges
-// itself by: nothing to fix, the findings addressed, the findings
-// left unaddressed.
+// TestReviewVerdict covers the verdicts the review judges itself by:
+// nothing to fix, the findings addressed, the findings left
+// unaddressed, and a turn that did not end cleanly.
 func TestReviewVerdict(t *testing.T) {
 	cases := []struct {
 		name string
 		// findings is how many findings the review reports.
 		findings int
 		// fix makes the coding agent commit the fixes.
-		fix  bool
-		want int
+		fix bool
+		// reason is how the turn the findings went into ended. The
+		// zero value is a clean end.
+		reason agent.PromptEndReason
+		// noGit makes the workspace a directory that is not a git
+		// repository: the verdict has no baseline to judge against.
+		noGit bool
+		want  int
 		// wantErr says the outcome must be an exception.
 		wantErr bool
+		// addressed is the `addressed` fact the outcome must carry.
+		// Empty means the key must not be there at all.
+		addressed string
 	}{
 		{
 			name: "nothing to fix",
 			want: http.StatusOK,
 		},
 		{
-			name:     "the findings were fixed",
+			name:      "the findings were fixed",
+			findings:  2,
+			fix:       true,
+			want:      http.StatusOK,
+			addressed: "true",
+		},
+		{
+			name:      "the findings were left unaddressed",
+			findings:  2,
+			want:      http.StatusOK,
+			addressed: "false",
+		},
+		{
+			name:     "the workspace could not be read",
 			findings: 2,
-			fix:      true,
+			noGit:    true,
 			want:     http.StatusOK,
 		},
 		{
-			name:     "the findings were left unaddressed",
+			name:     "the turn ended badly",
 			findings: 2,
-			want:     http.StatusConflict,
+			reason:   agent.PromptEndError,
+			want:     http.StatusInternalServerError,
 			wantErr:  true,
 		},
 	}
@@ -193,6 +227,9 @@ func TestReviewVerdict(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := initGitRepo(t)
+			if tc.noGit {
+				dir = t.TempDir()
+			}
 			set := newTestAgents(t)
 			set.registry.Register(&groupReviewStarter{
 				name:     "reviewer",
@@ -233,11 +270,12 @@ func TestReviewVerdict(t *testing.T) {
 			// judges what the work left behind.
 			cs.PromptEndBus.Publish(chatsession.PromptEndedEvent{
 				UserMsgID: "msg-1",
-				Reason:    agent.PromptEndClean,
+				Reason:    tc.reason,
 			})
 
 			got := waitOutcome(t, em, 5*time.Second)
 			assertOutcome(t, got, tc.want, map[string]string{"agent": "reviewer"})
+			assertAddressed(t, got, tc.addressed)
 			if tc.wantErr {
 				if got.Success {
 					t.Errorf("an exception is not a success: %v", got)

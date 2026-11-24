@@ -7,6 +7,11 @@ package review
 //
 // A count is a decimal string and a boolean is "true" or "false".
 const (
+	// BoolKeyAddressed says whether the findings were acted on: the
+	// workspace carries a new commit or a new change since the
+	// findings went out. It is absent when the review found no
+	// findings and when the workspace could not be read.
+	BoolKeyAddressed = "addressed"
 	// KeyAgent is the name of the agent that ran the review.
 	KeyAgent = "agent"
 	// KeyContinuedGroups is how many groups a continuation finished.

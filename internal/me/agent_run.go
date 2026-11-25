@@ -280,6 +280,9 @@ type run struct {
 	// decisionCount is how many decisions the run has taken. It
 	// names the decision that is open.
 	decisionCount int
+	// stateCount is how many states the run has published. It names
+	// the card the state opens.
+	stateCount int
 	// questionCount is how many questions the run has asked. It names
 	// the question that is open.
 	questionCount int
@@ -1507,24 +1510,6 @@ func (r *run) setRoundSession(sess *session) {
 	r.mu.Lock()
 	r.roundSession = sess
 	r.mu.Unlock()
-}
-
-// stateAnchor returns the message the state of the run hangs under.
-//
-// The state lands where the operator is looking: the message that
-// asked for it, or the card of the round the run is in. A run that has
-// no round has the card it started from.
-func (r *run) stateAnchor(messageID string) string {
-	if messageID != "" {
-		return messageID
-	}
-	if sess := r.roundSessionRef(); sess != nil && sess.anchor != "" {
-		return sess.anchor
-	}
-	if sess := r.runSessionRef(); sess != nil {
-		return sess.anchor
-	}
-	return ""
 }
 
 // recordAnchor returns the message the record of the run hangs under.

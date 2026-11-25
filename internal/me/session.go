@@ -17,11 +17,12 @@
 // line that says the agent takes the workflow over is the first entry
 // of the card, and every judgment of that step lands on it.
 //
-// The state of the run posts a placeholder of its own: the chat
-// renders the session onto the card of that message. The card of the
-// state is the latest card of the round: the run goes on with it. The
-// state the operator asks for lands on the card of the command's own
-// message instead.
+// The state of the run opens a card of its own: the line that says
+// where the run stands is the first entry of that card, and the chat
+// renders the rest of the state onto it. The card of the state is the
+// latest card of the round: the run goes on with it. The state the
+// operator asks for lands on the card of the command's own message
+// instead.
 //
 // The package speaks the standard outbound vocabulary
 // (internal/messages), and the chat renders it. The blocks the run
@@ -38,7 +39,6 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/pkg/outcome"
@@ -101,40 +101,6 @@ type session struct {
 // decision onto the card of that entry.
 const decisionLine = "NightMe is taking over the workflow"
 
-// stateLine is what the placeholder of the state of the run says.
-//
-// A placeholder says in one line what the card below it is about.
-const stateLine = "the run is reporting its state…"
-
-// placeholder posts the placeholder message of a session and returns
-// the session.
-//
-// The placeholder is a message of the chat: the id it becomes is the
-// anchor of the session, and the chat renders the session's events
-// onto the card of that message.
-//
-// A chat that refuses the message leaves the session without an
-// anchor: the run goes on, and the session's events fall back to the
-// chat's orphan handling.
-func (s *Service) placeholder(ctx context.Context, r *run, sess *session, line, replyTo string) *session {
-	if s.cfg.Operator == nil {
-		return sess
-	}
-	msgID, err := s.cfg.Operator.Ask(ctx, r.chatID, line, channel.SpeakOptions{
-		ReplyTo: replyTo,
-		Display: BotMark + line,
-		Owner:   r.owner,
-		RunID:   r.id,
-	})
-	if err != nil {
-		s.logger.Warn("me: the session placeholder could not be posted",
-			"run_id", r.id, "kind", string(sess.kind), "err", err)
-		return sess
-	}
-	sess.anchor = msgID
-	return sess
-}
-
 // openRunSession opens the session of the run.
 //
 // The session hangs under the message that started the run: the run
@@ -190,9 +156,8 @@ func (s *Service) openRoundSession(ctx context.Context, r *run, it iteration) {
 
 // showState publishes the state of the run on a card of its own.
 //
-// The run reports its state: it posts a placeholder for the state, and
-// the chat renders the state onto the card of that placeholder. The
-// placeholder hangs under the card of the round the run is in.
+// The run reports its state: the state opens a card of its own, and the
+// chat renders the state onto that card.
 func (s *Service) showState(ctx context.Context, r *run) {
 	// No message of the operator's own and no answer: the state opens a
 	// card of its own.
@@ -219,8 +184,11 @@ func (s *Service) showStateOnPause(ctx context.Context, r *run) {
 
 // stateSession builds the session the state of the run is published in.
 //
-// The state rides in the session of the round the run is in: the card of
-// that round is the card the state goes on.
+// The state the operator asks for rides in the session of the round the
+// run is in: the card of that round is the card the state goes on.
+//
+// The state the run publishes on its own opens a card of its own, and
+// that card is a session of its own: stateSessionID names it.
 func (r *run) stateSession(it iteration, inRound bool) *session {
 	sess := &session{kind: sessionRun, id: r.id}
 	if inRound {
@@ -230,6 +198,17 @@ func (r *run) stateSession(it iteration, inRound bool) *session {
 		sess.round = it.round
 	}
 	return sess
+}
+
+// stateSessionID names the session of a card the state opens.
+//
+// Every state the run publishes opens a card of its own, and every card
+// of its own is a session of its own.
+func (r *run) stateSessionID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stateCount++
+	return fmt.Sprintf("state-%d", r.stateCount)
 }
 
 // adoptState makes the card of the state the card the round goes on
@@ -261,14 +240,21 @@ func (s *Service) adoptState(r *run, sess *session, it iteration, inRound, own b
 // publishState publishes the state of the run in the given session.
 //
 // The state is a snapshot: the phase line of the run, the tree of the
-// rounds and the checklist of the round the run is in. A run that has
-// not entered a round yet has no round state to show: only the phase
-// line is published.
+// rounds and the checklist of the round the run is in.
 //
 // The session names itself before the state goes on it: see
 // answerCommand.
 func (s *Service) publishState(ctx context.Context, r *run, sess *session, it iteration, inRound bool) {
 	s.publishReply(ctx, r, sess, r.phaseLine())
+	s.publishStateBody(ctx, r, sess, it, inRound)
+}
+
+// publishStateBody publishes the state of the round the run is in.
+//
+// The body is the tree of the rounds and the checklist of the round. A
+// run that has not entered a round yet has no round state to show: the
+// body says nothing.
+func (s *Service) publishStateBody(ctx context.Context, r *run, sess *session, it iteration, inRound bool) {
 	if !inRound {
 		return
 	}

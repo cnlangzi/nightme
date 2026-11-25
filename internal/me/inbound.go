@@ -15,8 +15,8 @@ const meCommandPrefix = "/me "
 // A message a person sent while the run is going means the person
 // wants the chat back: the run stops after the step it is on, and
 // `/me resume` hands the control back. The person took the chat back,
-// so the state of the run is published at once: it hangs under the
-// card of the round, where the operator is looking.
+// so the state of the run is published at once: it opens a card of its
+// own, and the first line of that card says where the run stands.
 //
 // A reply to the run's own question is an answer, not a takeover. A
 // command that steers the run is not a takeover either.

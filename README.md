@@ -832,12 +832,11 @@ real message of that chat, marked with a bot sign:
 The receipt, the reaction and the permission card anchor to that message the way
 they anchor to a message you sent yourself. The run's overview — the steps, the
 current one, the last decision, the token usage — is a card in the chat, and so is
-every job iteration of the run: the chat keeps the record of how it went. Each of
-those cards hangs under a message the run posted; the message says in one line
-what the card below it holds. The card of the run is the one the chat already
-holds for the `/me start` message, and the state of the run lands on the card of
-the `/me pause`, `/me resume`, `/me next` or `/me status` message that asked for
-it.
+every job iteration of the run: the chat keeps the record of how it went. A round
+opens its card itself, and so does the state of the run when it reports itself.
+The card of the run is the one the chat already holds for the `/me start` message,
+and the state of the run lands on the card of the `/me pause`, `/me resume`,
+`/me next` or `/me status` message that asked for it.
 When the run
 asks a question, the choices become the card's buttons: a click is the answer. The
 question itself never reaches the agent — it is a message of the chat, not a turn
@@ -867,7 +866,9 @@ Two channels can be driven this way: Feishu and Telegram. On any other channel
 The run's lifecycle belongs to the `/me` commands alone: `/close`, `/stop` and
 `/new` end the chat's session, not the run. A person who writes in the chat while
 the run is going takes the chat back — the run stops after the step it is on, and
-`/me resume` hands the control back.
+`/me resume` hands the control back. The state of the run opens a card of its own
+then: the first line of that card says where the run stands, and the tree of the
+rounds and the checklist of the round follow it.
 
 The run lives in the chat that started it and in the daemon's memory: nothing of
 it is written to disk, and it does not survive a restart of the daemon. A daemon

@@ -203,8 +203,7 @@ type Operator interface {
 	// Ask puts a message in the chat and returns the id of the
 	// message it became. The message is visible and the operator
 	// can answer it, but the daemon does not take it as a turn of
-	// its own: a question the run asks, and the placeholder the run
-	// posts to open a card, both go this way.
+	// its own: a question the run asks goes this way.
 	Ask(ctx context.Context, chatID, text string, opts channel.SpeakOptions) (string, error)
 	// Act answers a prompt the chat is waiting for, as if a person
 	// had clicked the button.
@@ -819,9 +818,10 @@ func (s *Service) operatorDecision(ctx context.Context, chatID, messageID, note,
 // Status puts the state of the run back in front of the operator.
 //
 // The state hangs under the message the operator asked from: it is
-// where the operator is looking. It is a snapshot — the phase line of
-// the run, the tree of the rounds and the checklist of the round — and
-// a run that has no round has no round state to show.
+// where the operator is looking. A command without a message of its own
+// has no such card: the state opens one. It is a snapshot — the phase
+// line of the run, the tree of the rounds and the checklist of the
+// round — and a run that has no round has no round state to show.
 //
 // A chat without a run gets ErrNoRun.
 func (s *Service) Status(ctx context.Context, chatID, messageID string) error {

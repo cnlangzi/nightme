@@ -1280,7 +1280,7 @@ func TestTheQuestionIsNotDispatched(t *testing.T) {
 	}
 	waitAsked(t, op, "Which branch?")
 
-	asked := op.Questions()
+	asked := op.Asked()
 	if len(asked) != 1 {
 		t.Fatalf("the run asked %d questions, want 1", len(asked))
 	}

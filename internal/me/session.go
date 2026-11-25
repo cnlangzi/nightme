@@ -203,7 +203,9 @@ func (r *run) stateSession(it iteration, inRound bool) *session {
 // stateSessionID names the session of a card the state opens.
 //
 // Every state the run publishes opens a card of its own, and every card
-// of its own is a session of its own.
+// of its own is a session of its own. The name is what the chat shows
+// in the footer of that card: the state names itself the way a
+// decision does.
 func (r *run) stateSessionID() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()

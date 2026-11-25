@@ -90,9 +90,12 @@ func (s *Service) answerCommand(ctx context.Context, r *run, messageID, answer s
 		// The state opens a card of its own: the marker goes out
 		// without an anchor, the chat answers with the id of the card
 		// it wrote, and everything the state carries lands on that
-		// card from now on. The session names itself after that card:
-		// a session that keeps the name of the round would land on
-		// the card the round already has.
+		// card from now on.
+		//
+		// The card of the state is a session of its own, and it names
+		// itself after what it is: the state. The name of a session is
+		// what the chat shows in the footer of its card, and the card
+		// of the round keeps its own name.
 		sess.id = r.stateSessionID()
 		sess.anchor = s.publishReply(ctx, r, sess, stateMarker(r.phaseLine()))
 		s.publishReply(ctx, r, sess, answer)

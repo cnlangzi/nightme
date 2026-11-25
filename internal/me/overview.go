@@ -61,6 +61,9 @@ const (
 // The line is read from the run's own state, so every source that
 // posts the card says the same thing and the card cannot disagree with
 // the run about why it stopped.
+//
+// A pause carries the mark of the pause: the reader sees at once that
+// the run waits, and not only in the words of the line.
 func (r *run) phaseLine() string {
 	r.mu.Lock()
 	phase := r.phase
@@ -76,9 +79,9 @@ func (r *run) phaseLine() string {
 	switch {
 	case pending:
 		if reason == "" {
-			return "paused"
+			return pauseMark + "paused"
 		}
-		return clipLine("paused: "+reason, maxPhaseLine)
+		return clipLine(pauseMark+"paused: "+reason, maxPhaseLine)
 	case phase == PhaseAsking:
 		if question == "" {
 			return "asking"

@@ -1,9 +1,9 @@
 // Tests for the sessions the run speaks in.
 //
-// Every session owns one card: the placeholder the run posted when the
-// session opened. The card's message id is the anchor of every event
-// the session sends, so the chat renders the session onto that card
-// and patches it in place.
+// Every session owns one card: the chat writes it when the session
+// opens. The card's message id is the anchor of every event the
+// session sends, so the chat renders the session onto that card and
+// patches it in place.
 
 package me
 
@@ -263,11 +263,9 @@ func TestTheRoundGoesOnWithItsOwnCard(t *testing.T) {
 	}
 }
 
-// TestTheRoundPostsNoPlaceholderOfItsOwn — a round opens its own
-// card: the run posts no message to open it. A decision and the
-// state of the run still say in one line what the card below them is
-// about.
-func TestTheRoundPostsNoPlaceholderOfItsOwn(t *testing.T) {
+// TestTheRoundOpensItsCardWithoutAMessageOfItsOwn — a round opens its
+// own card: the run posts no message to open it.
+func TestTheRoundOpensItsCardWithoutAMessageOfItsOwn(t *testing.T) {
 	svc, op := sessionService(t)
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -277,15 +275,19 @@ func TestTheRoundPostsNoPlaceholderOfItsOwn(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	for _, m := range op.Asked() {
-		if strings.Contains(m.Text, "round") {
-			t.Errorf("the run asked %q, want no placeholder of the round", m.Text)
+	if asked := op.Asked(); len(asked) != 0 {
+		t.Errorf("the run asked %v, want no message of its own", asked)
+	}
+	// The round opens its card itself: the tree of the rounds is the
+	// line the card opens with.
+	var tree bool
+	for _, c := range op.Cards() {
+		if strings.HasPrefix(c.Body, "rounds:") {
+			tree = true
 		}
 	}
-	for _, c := range op.Cards() {
-		if strings.Contains(c.Body, "is starting") {
-			t.Errorf("the run posted %q, want no placeholder of the round", c.Body)
-		}
+	if !tree {
+		t.Errorf("the round opened no card of its own: %v", op.Cards())
 	}
 }
 
@@ -387,10 +389,10 @@ func TestTheRunCardCarriesTheTokensOfTheRun(t *testing.T) {
 	}
 }
 
-// TestThePlaceholderStartsNoTurnOfTheAgent — the placeholder is a
-// message of the chat, not a turn of the agent: the daemon does not
-// take it as one.
-func TestThePlaceholderStartsNoTurnOfTheAgent(t *testing.T) {
+// TestTheCardTheRunOpensStartsNoTurnOfTheAgent — a card the run opens
+// is a message of the chat, not a turn of the agent: the daemon does
+// not take it as one.
+func TestTheCardTheRunOpensStartsNoTurnOfTheAgent(t *testing.T) {
 	svc, op := sessionService(t)
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -405,7 +407,7 @@ func TestThePlaceholderStartsNoTurnOfTheAgent(t *testing.T) {
 		t.Fatal("the run opened no card")
 	}
 	if _, ok := op.Get(cards[0].ID); ok {
-		t.Errorf("the placeholder %q started a turn of the agent", cards[0].ID)
+		t.Errorf("the card %q started a turn of the agent", cards[0].ID)
 	}
 }
 
@@ -461,7 +463,7 @@ func TestTheChecklistOfAnOlderCardIsFrozen(t *testing.T) {
 }
 
 // TestACardTheChatRefusesGoesToTheOrphanPath — a chat that refuses the
-// placeholder leaves the session without an anchor: the run goes on and
+// card leaves the session without an anchor: the run goes on and
 // the content of the session goes to the chat's orphan handling.
 func TestACardTheChatRefusesGoesToTheOrphanPath(t *testing.T) {
 	dir := t.TempDir()

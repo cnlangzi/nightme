@@ -157,9 +157,6 @@ type fakeOperator struct {
 	// choiceGen counts the handlers that were installed, so that the
 	// removal of a handler does not take a newer one with it.
 	choiceGen int
-	// onCard is called while the chat takes a card: the test uses it to
-	// change the run in the time the card is posted.
-	onCard func()
 }
 
 func newFakeOperator(steps ...fakeStep) *fakeOperator {
@@ -237,20 +234,11 @@ type askedMessage struct {
 // Ask puts a question in the chat.
 //
 // The question is not dispatched: it belongs to the run, not to the
-// agent. The placeholder a session opens is asked the same way, and
-// the chat opens a card for it.
+// agent. A card the run opens is an outbound event of its own, not a
+// question.
 func (f *fakeOperator) Ask(_ context.Context, _ string, text string, opts channel.SpeakOptions) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	card := isPlaceholder(text)
-	if card {
-		f.cardAttempts++
-		if f.failCard ||
-			f.refuseAttempt == f.cardAttempts ||
-			(f.failCardAfter > 0 && len(f.cards) >= f.failCardAfter) {
-			return "", errors.New("the chat cannot take the message")
-		}
-	}
 	f.seq++
 	id := fmt.Sprintf("msg-%d", f.seq)
 	f.asked = append(f.asked, askedMessage{
@@ -259,23 +247,7 @@ func (f *fakeOperator) Ask(_ context.Context, _ string, text string, opts channe
 		ReplyTo: opts.ReplyTo,
 		MsgID:   id,
 	})
-	if card {
-		f.cards = append(f.cards, cardRecord{ID: id, Body: text, ReplyTo: opts.ReplyTo})
-		f.log = append(f.log, "card:"+id)
-		if f.onCard != nil {
-			f.onCard()
-		}
-	}
 	return id, nil
-}
-
-// isPlaceholder reports whether the text is a placeholder the run
-// posted to open a session.
-//
-// The questions the run asks begin with the question mark; a
-// placeholder says what is coming.
-func isPlaceholder(text string) bool {
-	return !strings.HasPrefix(text, questionMark)
 }
 
 // Asked returns the questions the run asked.
@@ -283,21 +255,6 @@ func (f *fakeOperator) Asked() []askedMessage {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]askedMessage(nil), f.asked...)
-}
-
-// Questions returns the questions the run asked.
-//
-// A placeholder opens a card; it is not a question.
-func (f *fakeOperator) Questions() []askedMessage {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]askedMessage, 0, len(f.asked))
-	for _, m := range f.asked {
-		if strings.HasPrefix(m.Text, questionMark) {
-			out = append(out, m)
-		}
-	}
-	return out
 }
 
 // Act answers a prompt the chat is waiting for.

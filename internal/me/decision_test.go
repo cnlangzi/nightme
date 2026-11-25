@@ -139,7 +139,7 @@ func TestTheReasonOfTheStepIsPublishedOnce(t *testing.T) {
 
 // TestTheDecisionAsksNothing — the card of a decision is opened by the
 // standard outbound events: the run asks the chat nothing. The state of
-// the run still asks for a card of its own.
+// the run opens a card of its own the same way.
 func TestTheDecisionAsksNothing(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
@@ -153,10 +153,14 @@ func TestTheDecisionAsksNothing(t *testing.T) {
 		t.Errorf("the run asked %v, want the decision to ask nothing", asked)
 	}
 
-	// The state of the run opens its card the way it always did.
+	// The state of the run opens a card of its own.
+	cards := op.Posted()
 	svc.showState(context.Background(), r)
-	if len(op.Asked()) == 0 {
-		t.Error("the state of the run asked nothing, want it to open a card of its own")
+	if op.Posted() != cards+1 {
+		t.Errorf("the run opened %d cards, want the card of the state", op.Posted()-cards)
+	}
+	if asked := op.Asked(); len(asked) != 0 {
+		t.Errorf("the run asked %v, want the state to ask nothing", asked)
 	}
 }
 

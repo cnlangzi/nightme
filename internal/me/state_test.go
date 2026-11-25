@@ -33,10 +33,10 @@ func TestThePhaseLineWithoutAStep(t *testing.T) {
 }
 
 // TestThePhaseLineNamesThePauseReason — a paused run says why it
-// stopped.
+// stopped, and it carries the mark of the pause.
 func TestThePhaseLineNamesThePauseReason(t *testing.T) {
 	r := &run{phase: PhasePaused, paused: true, pauseReason: "the operator paused the run"}
-	want := "paused: the operator paused the run"
+	want := "⏸ paused: the operator paused the run"
 	if got := r.phaseLine(); got != want {
 		t.Errorf("the phase line is %q, want %q", got, want)
 	}
@@ -46,7 +46,7 @@ func TestThePhaseLineNamesThePauseReason(t *testing.T) {
 // reason says it is paused.
 func TestThePhaseLineWithoutAPauseReason(t *testing.T) {
 	r := &run{phase: PhasePaused, paused: true}
-	if got := r.phaseLine(); got != "paused" {
+	if got := r.phaseLine(); got != "⏸ paused" {
 		t.Errorf("the phase line is %q, want it to say the run is paused", got)
 	}
 }
@@ -294,7 +294,7 @@ func TestAPausePublishesTheState(t *testing.T) {
 	if entries[0] != "⏸ The run pauses after the current step." {
 		t.Errorf("the answer is %q, want the answer of the pause", entries[0])
 	}
-	if len(entries) < 2 || !strings.HasPrefix(entries[1], "paused: the operator paused the run") {
+	if len(entries) < 2 || !strings.HasPrefix(entries[1], "⏸ paused: the operator paused the run") {
 		t.Fatalf("the phase line is %v, want it to name the pause", entries)
 	}
 }
@@ -544,8 +544,17 @@ func TestAResumeOfARunWithoutARoundPublishesThePhaseLine(t *testing.T) {
 	if !state.identity {
 		t.Error("the state carries no identity line")
 	}
-	if state.phase == "" {
-		t.Error("the state carries no phase line")
+	// The card opens with the phase line: the line that opens a card of
+	// its own went out without an anchor.
+	if !isPhaseLine(card.Body) {
+		t.Errorf("the card of the state opens with %q, want the phase line", card.Body)
+	}
+	// A run that is in no round has no round state to show.
+	if state.tree {
+		t.Error("the state carries the tree of the rounds")
+	}
+	if state.checklist != nil {
+		t.Error("the state carries a checklist of a round that does not exist")
 	}
 	if card.ID == "" {
 		t.Error("the run opened no card for the state")
@@ -553,8 +562,8 @@ func TestAResumeOfARunWithoutARoundPublishesThePhaseLine(t *testing.T) {
 }
 
 // TestATakeoverPublishesTheState — a person who writes in the chat
-// takes the chat back: the state of the run is published at once,
-// under the card of the round.
+// takes the chat back: the state of the run opens a card of its own,
+// and the first line of that card says where the run stands.
 func TestATakeoverPublishesTheState(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
@@ -574,6 +583,7 @@ func TestATakeoverPublishesTheState(t *testing.T) {
 		t.Fatal("the run has no card of the round")
 	}
 	before := op.Posted()
+	asked := len(op.Asked())
 
 	svc.Seen(&messages.InboundMessage{
 		ChatID:    "obs-1",
@@ -581,12 +591,59 @@ func TestATakeoverPublishesTheState(t *testing.T) {
 		Text:      "wait, stop there",
 		Origin:    messages.OriginHuman,
 	})
-	card, _ := waitForStateCardWith(t, op, "paused: you took over", 4)
-	if card.ReplyTo != round.anchor {
-		t.Errorf("the card of the state hangs under %q, want the card of the round", card.ReplyTo)
-	}
+	card, _ := waitForStateCardWith(t, op, "**⏸ paused: you took over", 3)
+
+	// One card, and no message of its own under it.
 	if op.Posted() != before+1 {
 		t.Errorf("the run opened %d cards, want the card of the state", op.Posted()-before)
+	}
+	if got := len(op.Asked()); got != asked {
+		t.Errorf("the run asked %d messages, want none", got-asked)
+	}
+	// The card is a card of its own: it hangs under nothing.
+	if card.ReplyTo != "" {
+		t.Errorf("the card of the state hangs under %q, want a card of its own", card.ReplyTo)
+	}
+	if card.ID == round.anchor {
+		t.Error("the state landed on the card of the round")
+	}
+	// The card opens with the state of the run.
+	want := "**⏸ paused: you took over — `/me resume` hands the control back**"
+	if card.Body != want {
+		t.Errorf("the card of the state opens with %q, want %q", card.Body, want)
+	}
+	// The state of the round is on that card: the tree of the rounds
+	// and the checklist of the round.
+	entries := op.Entries(card.ID)
+	var tree bool
+	for _, entry := range entries {
+		if strings.HasPrefix(entry, "rounds:") {
+			tree = true
+		}
+	}
+	if !tree {
+		t.Errorf("the card of the state carries no tree of the rounds: %v", entries)
+	}
+	if len(op.Checklist(card.ID)) == 0 {
+		t.Error("the card of the state carries no checklist of the round")
+	}
+	// The state is said once: the phase line is the line the card opens
+	// with, not a line of its own.
+	phases := 0
+	if isPhaseLine(card.Body) {
+		phases++
+	}
+	for _, entry := range entries {
+		if isPhaseLine(entry) {
+			phases++
+		}
+	}
+	if phases != 1 {
+		t.Errorf("the card of the state carries %d phase lines, want one: %v", phases, entries)
+	}
+	// The card of the state is the card the round goes on with.
+	if got := r.roundSessionRef(); got == nil || got.anchor != card.ID {
+		t.Errorf("the round goes on with %v, want the card of the state", got)
 	}
 }
 
@@ -653,16 +710,53 @@ func TestTheBudgetPausePublishesNoStateOfItsOwn(t *testing.T) {
 	// The state of the run is nowhere on a card of its own.
 	for _, c := range op.Cards() {
 		for _, entry := range op.Entries(c.ID) {
-			if strings.HasPrefix(entry, "paused: ") {
+			if isPhaseLine(entry) {
 				t.Errorf("the run published the phase line on %q: %q", c.ID, entry)
 			}
 		}
 	}
 }
 
+// TestTheBudgetPauseOpensTheStateCard — the run stops because the step
+// used up its budget, and no card of a decision is open: the state
+// opens a card of its own, and the first line of that card says where
+// the run stands.
+func TestTheBudgetPauseOpensTheStateCard(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", budgetWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}, MaxJudgments: 1})
+	op.steps = []fakeStep{failedStep("the commit failed")}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitPaused(t, svc, "obs-1")
+
+	// The state of the run is on a card of its own, and on no other.
+	var states []cardRecord
+	for _, c := range op.Cards() {
+		if isPhaseLine(c.Body) || carriesPhaseLine(c, stateUnder(op, c.ID)) {
+			states = append(states, c)
+		}
+	}
+	if len(states) != 1 {
+		t.Fatalf("the run published the state on %d cards, want one: %v", len(states), op.Cards())
+	}
+	card := states[0]
+	if card.ReplyTo != "" {
+		t.Errorf("the card of the state hangs under %q, want a card of its own", card.ReplyTo)
+	}
+	if want := "**⏸ paused: the step \"commit\" used up its budget"; !strings.HasPrefix(card.Body, want) {
+		t.Errorf("the card of the state opens with %q, want the state of the run", card.Body)
+	}
+}
+
 // TestTheRateLimitPausePublishesTheState — the run stops because the
-// agent was throttled: the state of the round is published under the
-// card of the round, and the chat is told that the run waits.
+// agent was throttled: the state opens a card of its own, and the chat
+// is told that the run waits.
 func TestTheRateLimitPausePublishesTheState(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
@@ -686,9 +780,9 @@ func TestTheRateLimitPausePublishesTheState(t *testing.T) {
 		t.Fatal("the run has no card of the round")
 	}
 
-	card, _ := waitForStateCardWith(t, op, "paused: the agent is rate limited (429)", 4)
-	if card.ReplyTo == "" {
-		t.Error("the card of the state hangs under nothing")
+	card, _ := waitForStateCardWith(t, op, "**⏸ paused: the agent is rate limited (429)", 3)
+	if card.ReplyTo != "" {
+		t.Errorf("the card of the state hangs under %q, want a card of its own", card.ReplyTo)
 	}
 
 	// The chat is told that the run waits: the state is a snapshot in a
@@ -800,8 +894,14 @@ func TestTheStatusRequestOfAChatWithoutARunIsRefused(t *testing.T) {
 
 // stateCardWith returns the card that carries the phase line that
 // starts with the given text.
+//
+// The line that opens the card is the body of the card: it went out
+// without an anchor.
 func stateCardWith(op *fakeOperator, prefix string) (cardRecord, []emittedMessage) {
 	for _, c := range op.Cards() {
+		if strings.HasPrefix(c.Body, prefix) {
+			return c, stateUnder(op, c.ID)
+		}
 		msgs := stateUnder(op, c.ID)
 		for _, m := range msgs {
 			if m.Kind != messages.OutReply {
@@ -885,7 +985,7 @@ func stateCard(op *fakeOperator, parent string) (cardRecord, []emittedMessage) {
 			continue
 		}
 		msgs := stateUnder(op, c.ID)
-		if !carriesPhaseLine(msgs) {
+		if !carriesPhaseLine(c, msgs) {
 			continue
 		}
 		return c, msgs
@@ -893,9 +993,15 @@ func stateCard(op *fakeOperator, parent string) (cardRecord, []emittedMessage) {
 	return cardRecord{}, nil
 }
 
-// carriesPhaseLine reports whether the messages carry the phase line of
+// carriesPhaseLine reports whether the card carries the phase line of
 // the run: the state of the run is the only thing that carries it.
-func carriesPhaseLine(msgs []emittedMessage) bool {
+//
+// The line that opens the card is its body: it went out without an
+// anchor.
+func carriesPhaseLine(c cardRecord, msgs []emittedMessage) bool {
+	if isPhaseLine(c.Body) {
+		return true
+	}
 	for _, m := range msgs {
 		if m.Kind != messages.OutReply {
 			continue
@@ -910,8 +1016,13 @@ func carriesPhaseLine(msgs []emittedMessage) bool {
 // isPhaseLine reports whether the text is the phase line of the run.
 //
 // The answer of the operator's command is an entry of the same card,
-// and it is not a phase line.
+// and it is not a phase line. The line that opens the card of the state
+// carries the marks that make it stand out: the mark of the pause and
+// the bold.
 func isPhaseLine(text string) bool {
+	text = strings.TrimPrefix(text, "**")
+	text = strings.TrimSuffix(text, "**")
+	text = strings.TrimPrefix(text, pauseMark)
 	return strings.HasPrefix(text, "running") ||
 		strings.HasPrefix(text, "paused") ||
 		strings.HasPrefix(text, "asking")

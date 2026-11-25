@@ -12,14 +12,16 @@ package me
 
 import (
 	"context"
+	"fmt"
 )
 
 // The marks the answers carry.
 //
 // The mark says what the command did with the step the run is on.
 const (
-	// pauseMark marks a pause in the chat: the answer of `/me pause`
-	// and the notice the run sends when it stops itself carry it.
+	// pauseMark marks a pause in the chat: the answer of `/me pause`,
+	// the phase line of a paused run and the notice the run sends when
+	// it stops itself carry it.
 	pauseMark = "⏸ "
 	// resumeMark marks the answer of `/me resume`.
 	resumeMark = "▶ "
@@ -75,8 +77,8 @@ func decisionAnswer(kind string, d OperatorDecision) string {
 // says where the run stands after it.
 //
 // A run that reports its state on its own has no such message: the
-// state then opens a card of its own, the way the run posts a
-// placeholder for it.
+// state then opens a card of its own, the first line of that card being
+// the state of the run.
 func (s *Service) answerCommand(ctx context.Context, r *run, messageID, answer string) {
 	it, inRound := r.roundIteration()
 	// A card of the run's own is opened for a pause: the run stops and
@@ -85,14 +87,42 @@ func (s *Service) answerCommand(ctx context.Context, r *run, messageID, answer s
 	own := messageID == ""
 	sess := r.stateSession(it, inRound)
 	if messageID == "" {
-		sess = s.placeholder(ctx, r, sess, stateLine, r.stateAnchor(""))
-	} else {
-		sess.anchor = messageID
+		// The state opens a card of its own: the marker goes out
+		// without an anchor, the chat answers with the id of the card
+		// it wrote, and everything the state carries lands on that
+		// card from now on.
+		//
+		// The card of the state is a session of its own, and it names
+		// itself after what it is: the state. The name of a session is
+		// what the chat shows in the footer of its card, and the card
+		// of the round keeps its own name.
+		sess.id = r.stateSessionID()
+		sess.anchor = s.publishReply(ctx, r, sess, stateMarker(r.phaseLine()))
+		s.publishReply(ctx, r, sess, answer)
+		// The identity comes after the marker: the marker is the line
+		// that opens the card, and the identity belongs to the card it
+		// opened.
+		s.publishInit(ctx, r, sess)
+		s.adoptState(r, sess, it, inRound, own)
+		s.publishStateBody(ctx, r, sess, it, inRound)
+		return
 	}
+	sess.anchor = messageID
 	// The session names itself before it speaks: a channel that shows
 	// the identity as a message of its own leads the card with it.
 	s.publishInit(ctx, r, sess)
 	s.publishReply(ctx, r, sess, answer)
 	s.adoptState(r, sess, it, inRound, own)
 	s.publishState(ctx, r, sess, it, inRound)
+}
+
+// stateMarker renders the line that opens the card of the state.
+//
+// The line is the state of the run itself: the card is read on its own,
+// and the first line says where the run stands. It carries the phase
+// line in bold, the way the card of a decision opens with its takeover
+// in bold: the state has to be seen at once among the entries of the
+// card.
+func stateMarker(phase string) string {
+	return fmt.Sprintf("**%s**", phase)
 }

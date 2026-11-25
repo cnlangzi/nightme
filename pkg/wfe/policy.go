@@ -510,6 +510,22 @@ func recordRound(rec ActionRecord) int {
 	return rec.Round
 }
 
+// SetOutcome writes the outcome of a step into the history.
+//
+// The verdict of a step lives in its own run record: an agent that
+// corrects the verdict writes it there, so the history and the run
+// state agree.
+func (p *Policy) SetOutcome(stepID string, out outcome.Outcome) {
+	for i := len(p.History) - 1; i >= 0; i-- {
+		rec := p.History[i]
+		if rec.Kind != ActionKindRun || rec.StepID != stepID {
+			continue
+		}
+		p.History[i].Outcome = out
+		return
+	}
+}
+
 // lastExecuted returns the step that ran last and its latest
 // outcome.
 //

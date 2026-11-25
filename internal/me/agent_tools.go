@@ -481,7 +481,11 @@ func (s *Service) toolNext(ctx context.Context, r *run, call pendingCall) (stepR
 		// The step did its job: there is nothing to skip.
 		return stepResult{}, toolErrorf("the step %q is already done: there is nothing to skip", step.ID)
 	}
-	return s.skipStep(ctx, r, step, agentSkippedSummary), nil
+	res, err := s.skipStep(ctx, r, step, agentSkippedSummary)
+	if err != nil {
+		return stepResult{}, toolErrorf("%s", err.Error())
+	}
+	return res, nil
 }
 
 // toolNextThrough passes the steps of the round over, up to and
@@ -497,19 +501,13 @@ func (s *Service) toolNextThrough(ctx context.Context, r *run, target string) (s
 	if from == "" {
 		return stepResult{}, toolErrorf("the run is not on a step")
 	}
-	steps, err := r.skipRange(from, target)
+	states, busy, err := s.skipThrough(ctx, r, from, target, agentSkippedSummary, false)
 	if err != nil {
 		return stepResult{}, toolErrorf("%s", err.Error())
 	}
-	for _, step := range steps {
-		if r.stepInFlightLocked(step.ID) {
-			// The work is in flight: the agent waits for it.
-			return stepResult{}, toolErrorf("the step %q is still running: wait for it", step.ID)
-		}
-	}
-	states, err := s.skipThrough(ctx, r, from, target, agentSkippedSummary)
-	if err != nil {
-		return stepResult{}, toolErrorf("%s", err.Error())
+	if busy != "" {
+		// The work is in flight: the agent waits for it.
+		return stepResult{}, toolErrorf("the step %q is still running: wait for it", busy)
 	}
 	if len(states) == 0 {
 		return stepResult{}, toolErrorf("there is nothing to skip")
@@ -535,6 +533,12 @@ func (s *Service) toolSetOutput(ctx context.Context, r *run, call pendingCall) (
 	if err != nil {
 		return stepResult{}, err
 	}
+	before, ok := r.stepState(stepID)
+	if ok && isSkippedOutcome(before.Outcome) {
+		// The step was passed over: it keeps its record, and the plan
+		// does not go back to it.
+		return stepResult{}, toolErrorf("the step %q was passed over: it has no output to write", stepID)
+	}
 	r.mu.Lock()
 	err = wfe.SetOutput(r.state, r.workflow, stepID, key, value)
 	r.mu.Unlock()
@@ -543,7 +547,11 @@ func (s *Service) toolSetOutput(ctx context.Context, r *run, call pendingCall) (
 	}
 	out, _ := r.stepState(stepID)
 	r.record(wfe.ActionKindOutput, "set_output "+stepID+" "+key, r.budgetStep(), out.Outcome)
+	// The verdict of the step lives in the history as well: the
+	// history and the run state have to agree about it.
+	r.setOutcome(stepID, out.Outcome)
 	r.markSituation()
+	s.refreshRoundTasks(r)
 	s.refreshRun(r)
 	return stepResult{Outcome: outcome.Outcome{
 		Success:    true,
@@ -564,12 +572,15 @@ func (s *Service) toolSetOutput(ctx context.Context, r *run, call pendingCall) (
 // The facts the step produced are kept, the error goes, and the
 // history agrees with the run state: the step is skipped, and the run
 // says so.
-func (s *Service) skipStep(ctx context.Context, r *run, step wfe.Step, summary string) stepResult {
-	states, err := s.skipThrough(ctx, r, step.ID, step.ID, summary)
-	if err != nil || len(states) == 0 {
-		return stepResult{}
+func (s *Service) skipStep(ctx context.Context, r *run, step wfe.Step, summary string) (stepResult, error) {
+	states, _, err := s.skipThrough(ctx, r, step.ID, step.ID, summary, true)
+	if err != nil {
+		return stepResult{}, err
 	}
-	return stepResult{Outcome: states[0].Outcome}
+	if len(states) == 0 {
+		return stepResult{}, nil
+	}
+	return stepResult{Outcome: states[0].Outcome}, nil
 }
 
 // skipThrough passes the steps of the range over and records what the
@@ -578,12 +589,16 @@ func (s *Service) skipStep(ctx context.Context, r *run, step wfe.Step, summary s
 // The engine owns the state: the steps of the range are recorded as
 // skipped there. The history follows the state: the run says which
 // steps it passed over, and the checklist of the round follows them.
-func (s *Service) skipThrough(ctx context.Context, r *run, from, target, summary string) ([]wfe.StepState, error) {
+//
+// The step of the range whose work is in flight is named, when there
+// is one. A caller that may not pass over a step whose work is in
+// flight says so: the range is left alone.
+func (s *Service) skipThrough(ctx context.Context, r *run, from, target, summary string, allowInFlight bool) ([]wfe.StepState, string, error) {
 	r.mu.Lock()
-	states, err := wfe.SkipThrough(r.state, r.workflow, from, target, summary)
+	states, busy, err := r.skipRangeLocked(from, target, summary, allowInFlight)
 	r.mu.Unlock()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	for _, st := range states {
 		step, ok := r.stepByID(st.ID)
@@ -597,7 +612,7 @@ func (s *Service) skipThrough(ctx context.Context, r *run, from, target, summary
 	r.markSituation()
 	s.refreshRoundTasks(r)
 	s.refreshRun(r)
-	return states, nil
+	return states, busy, nil
 }
 
 // stepCommand renders the command a step runs, the way the run records
@@ -1265,13 +1280,26 @@ func (s *Service) appendToolResult(r *run, call pendingCall, res stepResult, isE
 	})
 }
 
+// callArgs reads the arguments of a tool call.
+//
+// A call that carries no arguments has none: the reader of an
+// argument is the one that says the argument is missing.
+func callArgs(call pendingCall) (map[string]any, error) {
+	if len(call.Args) == 0 {
+		return nil, nil
+	}
+	var args map[string]any
+	if err := json.Unmarshal(call.Args, &args); err != nil {
+		return nil, toolErrorf("the arguments of %s are not valid JSON", call.Name)
+	}
+	return args, nil
+}
+
 // callArgString reads a string argument of a tool call.
 func callArgString(call pendingCall, name string) (string, error) {
-	var args map[string]any
-	if len(call.Args) > 0 {
-		if err := json.Unmarshal(call.Args, &args); err != nil {
-			return "", toolErrorf("the arguments of %s are not valid JSON", call.Name)
-		}
+	args, err := callArgs(call)
+	if err != nil {
+		return "", err
 	}
 	v, ok := args[name]
 	if !ok {
@@ -1289,11 +1317,9 @@ func callArgString(call pendingCall, name string) (string, error) {
 // An empty value is a value: a fact may be empty, and the agent says
 // so when it means it.
 func callArgText(call pendingCall, name string) (string, error) {
-	var args map[string]any
-	if len(call.Args) > 0 {
-		if err := json.Unmarshal(call.Args, &args); err != nil {
-			return "", toolErrorf("the arguments of %s are not valid JSON", call.Name)
-		}
+	args, err := callArgs(call)
+	if err != nil {
+		return "", err
 	}
 	v, ok := args[name]
 	if !ok {
@@ -1311,11 +1337,9 @@ func callArgText(call pendingCall, name string) (string, error) {
 //
 // An argument that is there but empty reads as absent.
 func callArgOptional(call pendingCall, name string) (string, bool) {
-	var args map[string]any
-	if len(call.Args) > 0 {
-		if err := json.Unmarshal(call.Args, &args); err != nil {
-			return "", false
-		}
+	args, err := callArgs(call)
+	if err != nil {
+		return "", false
 	}
 	v, ok := args[name]
 	if !ok {
@@ -1325,5 +1349,6 @@ func callArgOptional(call pendingCall, name string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return strings.TrimSpace(s), s != ""
+	trimmed := strings.TrimSpace(s)
+	return trimmed, trimmed != ""
 }

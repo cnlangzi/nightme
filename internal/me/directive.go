@@ -139,6 +139,8 @@ const (
 	reasonNotRun = "has not run"
 	// reasonWorking says the run is working on the step on its own.
 	reasonWorking = "is being worked on"
+	// reasonCannotSkip says the step could not be passed over.
+	reasonCannotSkip = "cannot be skipped"
 )
 
 // prepareDecision records the operator's decision for the run's next
@@ -214,14 +216,33 @@ func (r *run) splitTargetLocked(text string) (string, string) {
 	return first, strings.TrimSpace(rest)
 }
 
-// skipRange returns the steps a skip through the target covers.
+// skipRange passes the steps of the range over and records them.
 //
-// The engine owns the state: the range is computed from the run state
-// and the workflow.
-func (r *run) skipRange(from, target string) ([]wfe.Step, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return wfe.SkipRange(r.state, r.workflow, from, target)
+// The range, the steps whose work is in flight and the record of the
+// skip are one thing: they happen under the run's lock.
+//
+// The step of the range whose work is in flight is named, when there
+// is one. A caller that may not pass over a step whose work is in
+// flight says so: the range is left alone and the step is named.
+//
+// The caller holds the lock.
+func (r *run) skipRangeLocked(from, target, summary string, allowInFlight bool) ([]wfe.StepState, string, error) {
+	steps, err := wfe.SkipRange(r.state, r.workflow, from, target)
+	if err != nil {
+		return nil, "", err
+	}
+	busy := ""
+	for _, step := range steps {
+		if r.stepInFlightLocked(step.ID) {
+			busy = step.ID
+			break
+		}
+	}
+	if busy != "" && !allowInFlight {
+		// The work is in flight: the range is left alone.
+		return nil, busy, nil
+	}
+	return wfe.SkipSteps(r.state, r.workflow, steps, summary), busy, nil
 }
 
 // splitToken splits the first whitespace-separated token off a text.
@@ -396,6 +417,9 @@ func (r *run) decideTargetLocked(kind, target string) (OperatorDecision, error) 
 	// The run is working: it decides for itself.
 	if !r.pausePendingLocked() {
 		d.Why = reasonWorking
+		// The step the run works on is the one the command looks at:
+		// the step the operator named is not the one in flight.
+		d.Step = from
 		return d, nil
 	}
 	d.Act = true
@@ -629,7 +653,7 @@ func (s *Service) applySkipThrough(ctx context.Context, r *run, from, target str
 	if from == "" || target == "" {
 		return nil
 	}
-	states, err := s.skipThrough(ctx, r, from, target, operatorSkippedSummary)
+	states, _, err := s.skipThrough(ctx, r, from, target, operatorSkippedSummary, true)
 	if err != nil || len(states) == 0 {
 		return nil
 	}
@@ -698,7 +722,11 @@ func (s *Service) applyNext(ctx context.Context, r *run, stepID string) error {
 			return nil
 		}
 	}
-	res := s.skipStep(ctx, r, step, operatorSkippedSummary)
+	res, err := s.skipStep(ctx, r, step, operatorSkippedSummary)
+	if err != nil {
+		// The step was not passed over: the command records nothing.
+		return nil
+	}
 	s.recordOperatorAction(r, toolNext, nil, res)
 	return nil
 }
@@ -716,7 +744,12 @@ func (s *Service) skipRunningStep(ctx context.Context, r *run, stepID string) {
 	if !ok {
 		return
 	}
-	res := s.skipStep(ctx, r, step, operatorSkippedSummary)
+	res, err := s.skipStep(ctx, r, step, operatorSkippedSummary)
+	if err != nil {
+		// The step was not passed over: the command records nothing
+		// and the run goes on waiting for the command.
+		return
+	}
 	s.recordOperatorAction(r, toolNext, nil, res)
 	r.abandonCommand()
 }
@@ -727,14 +760,31 @@ func (s *Service) skipRunningStep(ctx context.Context, r *run, stepID string) {
 // waited for the run's next turn would wait for the command to finish.
 // The steps of the range are recorded as skipped at once, and the
 // command the run waits for is abandoned.
-func (s *Service) skipThroughNow(ctx context.Context, r *run, d OperatorDecision) {
-	states, err := s.skipThrough(ctx, r, d.from, d.Step, operatorSkippedSummary)
-	if err != nil || len(states) == 0 {
-		return
+//
+// It reports why the range was not passed over, when it was not: a
+// range that cannot be passed over leaves the run waiting for its
+// command.
+func (s *Service) skipThroughNow(ctx context.Context, r *run, d OperatorDecision) string {
+	states, _, err := s.skipThrough(ctx, r, d.from, d.Step, operatorSkippedSummary, true)
+	if err != nil {
+		return skipReason(err)
+	}
+	if len(states) == 0 {
+		return reasonCannotSkip
 	}
 	res := stepResult{Outcome: states[len(states)-1].Outcome}
 	s.recordOperatorAction(r, toolNext, map[string]any{"step_id": d.Step}, res)
 	r.abandonCommand()
+	return ""
+}
+
+// skipReason renders why a range was not passed over.
+func skipReason(err error) string {
+	var skipErr *wfe.SkipError
+	if errors.As(err, &skipErr) {
+		return skipErr.Reason
+	}
+	return reasonCannotSkip
 }
 
 // recordOperatorAction records what the operator did in the

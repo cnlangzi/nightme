@@ -1137,6 +1137,16 @@ func (r *run) record(kind wfe.ActionKind, command, stepID string, verdict outcom
 	r.recordAction(kind, command, stepID, verdict, false)
 }
 
+// setOutcome writes the outcome of a step into the policy's history.
+//
+// The verdict of a step lives in its own run record: the history and
+// the run state have to agree about it.
+func (r *run) setOutcome(stepID string, out outcome.Outcome) {
+	r.mu.Lock()
+	r.policy.SetOutcome(stepID, out)
+	r.mu.Unlock()
+}
+
 // recordSkipped appends a step that was passed over to the policy's
 // history.
 //

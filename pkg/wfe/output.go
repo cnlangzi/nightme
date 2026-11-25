@@ -3,6 +3,7 @@ package wfe
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 )
 
@@ -42,11 +43,28 @@ func SetOutput(state *RunState, wf *Workflow, stepID, key, value string) error {
 	if state == nil {
 		return errors.New("wfe: nil state")
 	}
-	st, ok := stepRecord(state, stepID)
-	if !ok {
+	idx := -1
+	for i := range state.Steps {
+		if state.Steps[i].ID == stepID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
 		return fmt.Errorf("wfe: the step %q has no record: there is no output to write", stepID)
 	}
-	out := st.Outcome
+	if state.Steps[idx].Pending {
+		// The step started and has not settled: its work is in
+		// flight, and the verdict that comes back replaces whatever is
+		// written here.
+		return fmt.Errorf("wfe: the step %q is still running", stepID)
+	}
+	if state.Steps[idx].Skipped {
+		// The step did not run: its condition did not hold, and there
+		// is no output of its own to write.
+		return fmt.Errorf("wfe: the step %q did not run: there is no output to write", stepID)
+	}
+	out := state.Steps[idx].Outcome
 	switch key {
 	case outputStatus:
 		status, err := strconv.Atoi(value)
@@ -60,19 +78,18 @@ func SetOutput(state *RunState, wf *Workflow, stepID, key, value string) error {
 	case outputSuccess:
 		return fmt.Errorf("wfe: the success of a step follows from its status: write the status instead")
 	default:
-		if out.Data == nil {
-			out.Data = map[string]string{}
+		// The facts are copied: the map of the record is shared with
+		// the history, and a fact written here must not change what
+		// the history holds.
+		data := maps.Clone(out.Data)
+		if data == nil {
+			data = map[string]string{}
 		}
-		out.Data[key] = value
+		data[key] = value
+		out.Data = data
 	}
-	for i := range state.Steps {
-		if state.Steps[i].ID != stepID {
-			continue
-		}
-		state.Steps[i].Outcome = out
-		reviveSteps(state, wf)
-		return nil
-	}
+	state.Steps[idx].Outcome = out
+	reviveSteps(state, wf)
 	return nil
 }
 
@@ -82,6 +99,9 @@ func SetOutput(state *RunState, wf *Workflow, stepID, key, value string) error {
 // A step whose condition did not hold was passed over when the plan
 // looked at it. An output that changes what the condition reads
 // unblocks it: the step runs again.
+//
+// A step of a job whose own condition did not hold was passed over
+// with it: the job runs again when its condition holds now.
 func reviveSteps(state *RunState, wf *Workflow) {
 	if wf == nil {
 		return
@@ -91,17 +111,43 @@ func reviveSteps(state *RunState, wf *Workflow) {
 	// lock, so the old one must not be written to.
 	kept := make([]StepState, 0, len(state.Steps))
 	for _, st := range state.Steps {
-		if st.Skipped && st.Outcome.StatusText == conditionDidNotHold {
-			step := StepByID(wf, st.ID)
-			if step != nil && step.If != "" {
-				ok, err := EvalCond(step.If, ec)
-				if err == nil && ok {
-					// The condition holds now: the step runs.
-					continue
-				}
-			}
+		if st.Skipped && st.Outcome.StatusText == conditionDidNotHold && stepRunsNow(wf, st, ec) {
+			// The condition holds now: the step runs.
+			continue
 		}
 		kept = append(kept, st)
 	}
 	state.Steps = kept
+}
+
+// stepRunsNow reports whether the step runs with the state as it
+// stands.
+//
+// The job of the step and the step itself both have a condition: the
+// step runs when the conditions that govern it hold.
+func stepRunsNow(wf *Workflow, st StepState, ec ExprCtx) bool {
+	step := StepByID(wf, st.ID)
+	if step == nil {
+		return false
+	}
+	job, ok := wf.Jobs[st.Job]
+	if !ok {
+		return false
+	}
+	if !conditionHolds(job.If, ec) || !conditionHolds(step.If, ec) {
+		return false
+	}
+	// Nothing governs the step: it ran when the plan looked at it,
+	// and nothing changed.
+	return job.If != "" || step.If != ""
+}
+
+// conditionHolds reports whether the condition holds. A condition that
+// is not there holds.
+func conditionHolds(cond string, ec ExprCtx) bool {
+	if cond == "" {
+		return true
+	}
+	ok, err := EvalCond(cond, ec)
+	return err == nil && ok
 }

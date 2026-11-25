@@ -15,8 +15,11 @@
 //	/me status                                — show the state of the run again
 //
 // The step id of `/me resume` and `/me next` names the step the command
-// acts on: the steps of the round from the step the run is on up to it
-// are passed over. A text that names no step is the note of the
+// acts on: the step has to be in the round the run is on, and at or
+// after the step the run is on. `/me next` passes the steps of the
+// round up to and including the step it names over; `/me resume` runs
+// the step it names again, and that step has to have run in the round
+// and not have succeeded. A text that names no step is the note of the
 // command.
 //
 // The `-i` flag of `/me start` sets how many rounds every job of the
@@ -85,8 +88,8 @@ func (f *Factory) Spec() command.Spec {
 			{Name: "start", Summary: "Start a workflow in this chat. -i sets the rounds. A name without an owner is the project's own: coder is nightme/coder."},
 			{Name: "reply", Summary: "Answer the question the run asked."},
 			{Name: "pause", Summary: "Stop the run after the current step."},
-			{Name: "resume", Summary: "Run a step of the round again: the step the run is on, or the step you name."},
-			{Name: "next", Summary: "Skip the steps of the round up to the step you name, or the step the run is on."},
+			{Name: "resume", Summary: "Run the step that broke again. Name the step to say which one you mean."},
+			{Name: "next", Summary: "Skip the steps of the round up to and including the step you name, or the step the run is on."},
 			{Name: "stop", Summary: "Stop the run of this chat."},
 			{Name: "status", Summary: "Show the state of the run again."},
 		},
@@ -252,7 +255,9 @@ func (f *Factory) pause(ctx context.Context, rt command.RuntimeServices, input c
 //
 // The step the operator names is the step the command acts on: the
 // text after the subcommand names it when its first token is a step of
-// the workflow.
+// the workflow. The step has to have run in the round and not have
+// succeeded: a step that has passed, that did its job or that has not
+// run is refused.
 func (f *Factory) resume(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	text := decisionText(input.Text)
 	d, err := f.ctrl.Resume(ctx, input.ChatID, input.MessageID, text)
@@ -279,9 +284,10 @@ func (f *Factory) resume(ctx context.Context, rt command.RuntimeServices, input 
 // promises a skip only when there is a step to pass over. A step that
 // succeeded is answered with the reason.
 //
-// The step the operator names is the step the command lands on: the
+// The step the operator names is the step the command acts on: the
 // text after the subcommand names it when its first token is a step of
-// the workflow.
+// the workflow. The steps of the round up to and including it are
+// passed over.
 func (f *Factory) next(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	text := decisionText(input.Text)
 	d, err := f.ctrl.Next(ctx, input.ChatID, input.MessageID, text)

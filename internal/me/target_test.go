@@ -428,6 +428,56 @@ func TestTheNextToolWithATargetThatCannotBeMovedIsRefused(t *testing.T) {
 	}
 }
 
+// TestTheNextToolWithATargetRunsWhileTheRunMoves — the tool reads the
+// state of the run while the run goes on: the race detector watches.
+func TestTheNextToolWithATargetRunsWhileTheRunMoves(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "many", manyStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "many")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	review, ok := r.stepByID("review")
+	if !ok {
+		t.Fatal("the workflow has no review step")
+	}
+	r.setJudgmentStep("commit")
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			r.setRunningStep("commit")
+			r.recordStep("main", commit, outcome.Outcome{
+				Success:    false,
+				Status:     http.StatusInternalServerError,
+				StatusText: "the commit failed",
+			})
+			r.recordStep("main", review, outcome.Outcome{
+				Success:    false,
+				Status:     http.StatusInternalServerError,
+				StatusText: "the review failed",
+			})
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		call := pendingCall{Name: toolNext, Args: []byte(`{"step_id":"review"}`)}
+		_, _ = svc.toolNext(context.Background(), r, call)
+	}
+	close(stop)
+	<-done
+}
+
 // TestSetOutput_WritesAFactOfAStep — the agent corrects a fact: the
 // step's output holds the new value.
 func TestSetOutput_WritesAFactOfAStep(t *testing.T) {
@@ -596,6 +646,31 @@ func TestSetOutput_RefusesAStepThatHasNotRun(t *testing.T) {
 	}
 }
 
+// TestSetOutput_RefusesAStepThatIsStillRunning — a step whose work is
+// in flight has no verdict to write: the tool says so.
+func TestSetOutput_RefusesAStepThatIsStillRunning(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "many", manyStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "many")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.setJudgmentStep("commit")
+	r.recordPending("main", commit)
+
+	call := pendingCall{Name: toolSetOutput, Args: []byte(`{"step_id":"commit","key":"status","value":"200"}`)}
+	_, err := svc.toolSetOutput(context.Background(), r, call)
+	if err == nil || !isToolError(err) {
+		t.Fatalf("err = %v, want a tool error the model can correct", err)
+	}
+	if !strings.Contains(err.Error(), "still running") {
+		t.Errorf("the refusal does not say why: %v", err)
+	}
+}
+
 // TestSetOutput_IsInTheHistoryAndCostsAChance — the correction is work
 // the agent causes: it is in the history and it costs a chance.
 func TestSetOutput_IsInTheHistoryAndCostsAChance(t *testing.T) {
@@ -633,6 +708,108 @@ func TestSetOutput_IsInTheHistoryAndCostsAChance(t *testing.T) {
 	after, _ := r.stepUsage("commit")
 	if after-before != 1 {
 		t.Errorf("the step spent %d chances, want 1 (the limit is %d)", after-before, limit)
+	}
+}
+
+// TestTheCorrectedVerdictReachesTheFinishCheck — the history carries
+// the corrected verdict: the run may end as done.
+func TestTheCorrectedVerdictReachesTheFinishCheck(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "many", manyStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "many")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.setJudgmentStep("commit")
+	failed := outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the commit failed",
+	}
+	r.recordStep("main", commit, failed)
+	r.record(wfe.ActionKindRun, "/gtw commit", "commit", failed)
+
+	if err := r.checkFinish("done"); err == nil {
+		t.Fatal("the run may end as done although the step broke")
+	}
+
+	call := pendingCall{Name: toolSetOutput, Args: []byte(`{"step_id":"commit","key":"status","value":"200"}`)}
+	if _, err := svc.toolSetOutput(context.Background(), r, call); err != nil {
+		t.Fatalf("set_output: %v", err)
+	}
+	if err := r.checkFinish("done"); err != nil {
+		t.Errorf("the run may not end as done: %v", err)
+	}
+}
+
+// TestSetOutput_RefusesAStepThatWasPassedOver — a step that was
+// passed over keeps its record: it has no output to write.
+func TestSetOutput_RefusesAStepThatWasPassedOver(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "many", manyStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "many")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.setJudgmentStep("commit")
+	r.recordStep("main", commit, outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the commit failed",
+	})
+	res, err := svc.skipStep(context.Background(), r, commit, operatorSkippedSummary)
+	if err != nil {
+		t.Fatalf("skip: %v", err)
+	}
+	if res.Status != http.StatusOK {
+		t.Fatalf("the step ended as %d, want the skipped one", res.Status)
+	}
+
+	call := pendingCall{Name: toolSetOutput, Args: []byte(`{"step_id":"commit","key":"status","value":"500"}`)}
+	_, err = svc.toolSetOutput(context.Background(), r, call)
+	if err == nil || !isToolError(err) {
+		t.Fatalf("err = %v, want a tool error the model can correct", err)
+	}
+	if !strings.Contains(err.Error(), "passed over") {
+		t.Errorf("the refusal does not say why: %v", err)
+	}
+}
+
+// TestTheNextToolWithABlankStepIdActsOnTheCurrentStep — a step id
+// that is blank names no step.
+func TestTheNextToolWithABlankStepIdActsOnTheCurrentStep(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "many", manyStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "many")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.setJudgmentStep("commit")
+	r.recordStep("main", commit, outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the commit failed",
+	})
+
+	call := pendingCall{Name: toolNext, Args: []byte(`{"step_id":"   "}`)}
+	if _, err := svc.toolNext(context.Background(), r, call); err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	st, ok := r.stepState("commit")
+	if !ok {
+		t.Fatal("the commit step has no state")
+	}
+	if !isSkippedOutcome(st.Outcome) {
+		t.Errorf("the step ended as %d, want the skipped one", st.Outcome.Status)
 	}
 }
 

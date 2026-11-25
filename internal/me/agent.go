@@ -808,7 +808,11 @@ func (s *Service) operatorDecision(ctx context.Context, chatID, messageID, text,
 	}
 	if d.skippedNow {
 		if d.Through {
-			s.skipThroughNow(ctx, r, d)
+			if reason := s.skipThroughNow(ctx, r, d); reason != "" {
+				// The steps were not passed over: the answer says so.
+				d.Act = false
+				d.Why = reason
+			}
 		} else {
 			s.skipRunningStep(ctx, r, d.Step)
 		}

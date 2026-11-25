@@ -107,13 +107,21 @@ func SkipThrough(state *RunState, wf *Workflow, from, target, summary string) ([
 	if err != nil {
 		return nil, err
 	}
+	return SkipSteps(state, wf, steps, summary), nil
+}
+
+// SkipSteps records the steps of a range as skipped.
+//
+// The range is the one SkipRange returns: the caller that needs to
+// look at the range before it is passed over does not walk it twice.
+func SkipSteps(state *RunState, wf *Workflow, steps []Step, summary string) []StepState {
 	out := make([]StepState, 0, len(steps))
 	for _, step := range steps {
 		RecordStep(state, JobOf(wf, step.ID), step, passedOver(state, step, summary), false)
 		st, _ := stepRecord(state, step.ID)
 		out = append(out, st)
 	}
-	return out, nil
+	return out
 }
 
 // passedOver builds the outcome of a step that was passed over.

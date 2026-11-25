@@ -171,6 +171,171 @@ func TestSetOutput_UnblocksTheStepsWhoseConditionHoldsNow(t *testing.T) {
 	}
 }
 
+// TestSetOutput_RefusesAStepThatIsStillRunning — a step whose work is
+// in flight has no verdict to write: the verdict that comes back
+// replaces it.
+func TestSetOutput_RefusesAStepThatIsStillRunning(t *testing.T) {
+	wf := mustParse(t, threeStepYAML)
+	state := newRunState(wf)
+	RecordPending(state, "main", wf.Jobs["main"].Steps[0])
+
+	err := SetOutput(state, wf, "one", "status", "200")
+	if err == nil {
+		t.Fatal("the output of a step that is still running was written")
+	}
+	if !strings.Contains(err.Error(), "still running") {
+		t.Errorf("the refusal does not say why: %v", err)
+	}
+}
+
+// TestSetOutput_DoesNotChangeTheFactsOfTheRecordInPlace — the facts
+// are copied: a reader that holds the map of the record keeps what it
+// read.
+func TestSetOutput_DoesNotChangeTheFactsOfTheRecordInPlace(t *testing.T) {
+	wf := mustParse(t, threeStepYAML)
+	state := newRunState(wf)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "committed",
+		Data:       map[string]string{"commits": "3"},
+	}, false)
+	before, _ := stepRecord(state, "one")
+
+	if err := SetOutput(state, wf, "one", "commits", "5"); err != nil {
+		t.Fatalf("SetOutput: %v", err)
+	}
+	if before.Outcome.Data["commits"] != "3" {
+		t.Errorf("the facts of the earlier record changed: %v", before.Outcome.Data)
+	}
+}
+
+// TestSetOutput_UnblocksTheStepsOfAJobWhoseConditionHoldsNow — a job
+// whose condition did not hold runs again when the condition holds
+// now.
+func TestSetOutput_UnblocksTheStepsOfAJobWhoseConditionHoldsNow(t *testing.T) {
+	wf := mustParse(t, `
+title: gated job
+jobs:
+  main:
+    steps:
+      - id: commit
+        message: "/commit"
+  side:
+    if: ${{ steps.commit.outputs.success == "true" }}
+    steps:
+      - id: push
+        message: "/push"
+`)
+	state := newRunState(wf)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the commit failed",
+	}, false)
+
+	decision, err := Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionJudgment {
+		t.Fatalf("the engine decided %v, want a judgment point", decision.Kind)
+	}
+	if _, ok := stepRecord(state, "push"); !ok {
+		t.Fatal("the step of the job has no record")
+	}
+
+	if err := SetOutput(state, wf, "commit", "status", "200"); err != nil {
+		t.Fatalf("SetOutput: %v", err)
+	}
+
+	decision, err = Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionRun {
+		t.Fatalf("the engine decided %v (%q), want the step of the job to run", decision.Kind, decision.Reason)
+	}
+	if decision.Step.ID != "push" {
+		t.Errorf("the engine runs %q, want push", decision.Step.ID)
+	}
+}
+
+// TestSetOutput_KeepsTheStepsOfAJobWhoseConditionStillFails — the
+// job's condition governs its steps: a step of a job that does not run
+// stays out of the plan.
+func TestSetOutput_KeepsTheStepsOfAJobWhoseConditionStillFails(t *testing.T) {
+	wf := mustParse(t, `
+title: gated job
+jobs:
+  main:
+    steps:
+      - id: commit
+        message: "/commit"
+  side:
+    if: ${{ steps.commit.outputs.success == "false" }}
+    steps:
+      - id: push
+        message: "/push"
+        if: ${{ steps.commit.outputs.success == "true" }}
+`)
+	state := newRunState(wf)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the commit failed",
+	}, false)
+
+	if _, err := Decide(state, wf); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if _, ok := stepRecord(state, "push"); !ok {
+		t.Fatal("the step of the job has no record")
+	}
+
+	// The step of the job waits for a verdict the job does not wait
+	// for: the job does not run.
+	if err := SetOutput(state, wf, "commit", "status", "200"); err != nil {
+		t.Fatalf("SetOutput: %v", err)
+	}
+	if _, ok := stepRecord(state, "push"); !ok {
+		t.Fatal("the step of the job has no record")
+	}
+}
+
+// TestSetOutput_RefusesAStepThatDidNotRun — a step whose condition did
+// not hold has no output of its own.
+func TestSetOutput_RefusesAStepThatDidNotRun(t *testing.T) {
+	wf := mustParse(t, `
+title: gated
+jobs:
+  main:
+    steps:
+      - id: commit
+        message: "/commit"
+      - id: push
+        message: "/push"
+        if: ${{ steps.commit.outputs.success == "true" }}
+`)
+	state := newRunState(wf)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusInternalServerError,
+		StatusText: "the commit failed",
+	}, false)
+	if _, err := Decide(state, wf); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+
+	err := SetOutput(state, wf, "push", "status", "200")
+	if err == nil {
+		t.Fatal("the output of a step that did not run was written")
+	}
+	if !strings.Contains(err.Error(), "did not run") {
+		t.Errorf("the refusal does not say why: %v", err)
+	}
+}
+
 // TestSetOutput_RefusesTheSuccess — the verdict of a step follows from
 // its status: there is no separate way to write it.
 func TestSetOutput_RefusesTheSuccess(t *testing.T) {

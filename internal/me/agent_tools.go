@@ -23,6 +23,11 @@ const (
 	toolResume = "resume"
 	// toolNext says the step is already done.
 	toolNext = "next"
+	// toolSetOutput writes into the output of a step that ran.
+	//
+	// The agent knows a fact or a verdict of a step is wrong: the tool
+	// is how it says so.
+	toolSetOutput = "set_output"
 	// toolRunStep names the step the decision model ran.
 	//
 	// The chat model has no such tool: it repairs a gap and says which
@@ -45,6 +50,23 @@ const (
 	toolEndRound = "end_round"
 	// toolFinish ends the run.
 	toolFinish = "finish"
+)
+
+// The keys the facts of the output correction carry.
+//
+// The correction says what it wrote and what the step's verdict is
+// now: the model reads both.
+const (
+	// outcomeKeyStep is the step whose output was written.
+	outcomeKeyStep = "step"
+	// outcomeKeyKey is the name of the fact that was written.
+	outcomeKeyKey = "key"
+	// outcomeKeyValue is the value that was written.
+	outcomeKeyValue = "value"
+	// outcomeKeyStatus is the status the step ended with.
+	outcomeKeyStatus = "status"
+	// outcomeKeySuccess is whether the step succeeded.
+	outcomeKeySuccess = "success"
 )
 
 // maxWait is how long one wait may last.
@@ -123,8 +145,13 @@ func (s *Service) toolCatalogue(r *run) []llm.Tool {
 		},
 		{
 			Name:        toolNext,
-			Description: "Skip the step the judgment is about and let the engine continue with the workflow.",
-			Schema:      json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+			Description: "Skip the step the judgment is about and let the engine continue with the workflow. Name a step to pass the steps of the round over up to it.",
+			Schema:      json.RawMessage(`{"type":"object","properties":{"step_id":{"type":"string","description":"the step to pass the steps of the round over to"}},"additionalProperties":false}`),
+		},
+		{
+			Name:        toolSetOutput,
+			Description: "Write into the output of a step that ran: one of its facts, or its verdict. The verdict follows from the status: a 2xx is a success, anything else is not. A step that waits for what you write runs again once the condition holds.",
+			Schema:      json.RawMessage(`{"type":"object","properties":{"step_id":{"type":"string","description":"the step whose output is written"},"key":{"type":"string","description":"the name of the fact, or status, or statusText"},"value":{"type":"string","description":"the value of the fact"}},"required":["step_id","key","value"],"additionalProperties":false}`),
 		},
 	}
 	tools = append(tools, commandTools(r)...)
@@ -324,6 +351,8 @@ func (s *Service) execTool(ctx context.Context, r *run, call pendingCall) (stepR
 		return s.toolResume(ctx, r, call)
 	case toolNext:
 		return s.toolNext(ctx, r, call)
+	case toolSetOutput:
+		return s.toolSetOutput(ctx, r, call)
 	case toolInstruct:
 		return s.toolInstruct(ctx, r, call)
 	case toolAgent:
@@ -429,7 +458,13 @@ func (s *Service) runStepAgain(ctx context.Context, r *run, step wfe.Step, fresh
 // The step is the one the run is on: the judgment names it, and the
 // run knows it. The step is recorded as skipped — the facts it produced
 // are kept, the error goes — and the engine plans the next step.
-func (s *Service) toolNext(ctx context.Context, r *run, _ pendingCall) (stepResult, error) {
+//
+// The agent may name a step instead: the steps of the round from the
+// step the run is on up to the step it named are passed over.
+func (s *Service) toolNext(ctx context.Context, r *run, call pendingCall) (stepResult, error) {
+	if target, ok := callArgOptional(call, "step_id"); ok {
+		return s.toolNextThrough(ctx, r, target)
+	}
 	step, err := judgmentStep(r)
 	if err != nil {
 		return stepResult{}, err
@@ -446,7 +481,90 @@ func (s *Service) toolNext(ctx context.Context, r *run, _ pendingCall) (stepResu
 		// The step did its job: there is nothing to skip.
 		return stepResult{}, toolErrorf("the step %q is already done: there is nothing to skip", step.ID)
 	}
-	return s.skipStep(ctx, r, step, agentSkippedSummary), nil
+	res, err := s.skipStep(ctx, r, step, agentSkippedSummary)
+	if err != nil {
+		return stepResult{}, toolErrorf("%s", err.Error())
+	}
+	return res, nil
+}
+
+// toolNextThrough passes the steps of the round over, up to and
+// including the target.
+//
+// The target is a step the agent names: the steps of the round between
+// the step the run is on and the target are passed over, and the engine
+// plans the next step.
+func (s *Service) toolNextThrough(ctx context.Context, r *run, target string) (stepResult, error) {
+	r.mu.Lock()
+	from := r.targetStepLocked()
+	r.mu.Unlock()
+	if from == "" {
+		return stepResult{}, toolErrorf("the run is not on a step")
+	}
+	states, busy, err := s.skipThrough(ctx, r, from, target, agentSkippedSummary, false)
+	if err != nil {
+		return stepResult{}, toolErrorf("%s", err.Error())
+	}
+	if busy != "" {
+		// The work is in flight: the agent waits for it.
+		return stepResult{}, toolErrorf("the step %q is still running: wait for it", busy)
+	}
+	if len(states) == 0 {
+		return stepResult{}, toolErrorf("there is nothing to skip")
+	}
+	return stepResult{Outcome: states[len(states)-1].Outcome}, nil
+}
+
+// toolSetOutput writes into the output of a step.
+//
+// The engine owns the state: the write goes through the engine, and
+// the run's history says what the agent changed. The correction costs
+// a chance of the step the run is on: it is work the agent causes.
+func (s *Service) toolSetOutput(ctx context.Context, r *run, call pendingCall) (stepResult, error) {
+	stepID, err := callArgString(call, "step_id")
+	if err != nil {
+		return stepResult{}, err
+	}
+	key, err := callArgString(call, "key")
+	if err != nil {
+		return stepResult{}, err
+	}
+	value, err := callArgText(call, "value")
+	if err != nil {
+		return stepResult{}, err
+	}
+	before, ok := r.stepState(stepID)
+	if ok && isSkippedOutcome(before.Outcome) {
+		// The step was passed over: it keeps its record, and the plan
+		// does not go back to it.
+		return stepResult{}, toolErrorf("the step %q was passed over: it has no output to write", stepID)
+	}
+	r.mu.Lock()
+	err = wfe.SetOutput(r.state, r.workflow, stepID, key, value)
+	r.mu.Unlock()
+	if err != nil {
+		return stepResult{}, toolErrorf("%s", err.Error())
+	}
+	out, _ := r.stepState(stepID)
+	r.record(wfe.ActionKindOutput, "set_output "+stepID+" "+key, r.budgetStep(), out.Outcome)
+	// The verdict of the step lives in the history as well: the
+	// history and the run state have to agree about it.
+	r.setOutcome(stepID, out.Outcome)
+	r.markSituation()
+	s.refreshRoundTasks(r)
+	s.refreshRun(r)
+	return stepResult{Outcome: outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the output of " + stepID + " was written",
+		Data: map[string]string{
+			outcomeKeyStep:    stepID,
+			outcomeKeyKey:     key,
+			outcomeKeyValue:   value,
+			outcomeKeyStatus:  strconv.Itoa(out.Outcome.Status),
+			outcomeKeySuccess: strconv.FormatBool(out.Outcome.Success),
+		},
+	}}, nil
 }
 
 // skipStep records the step as skipped and returns the outcome.
@@ -454,19 +572,47 @@ func (s *Service) toolNext(ctx context.Context, r *run, _ pendingCall) (stepResu
 // The facts the step produced are kept, the error goes, and the
 // history agrees with the run state: the step is skipped, and the run
 // says so.
-func (s *Service) skipStep(ctx context.Context, r *run, step wfe.Step, summary string) stepResult {
-	out := outcome.Outcome{}
-	if st, ok := r.stepState(step.ID); ok {
-		out = st.Outcome
+func (s *Service) skipStep(ctx context.Context, r *run, step wfe.Step, summary string) (stepResult, error) {
+	states, _, err := s.skipThrough(ctx, r, step.ID, step.ID, summary, true)
+	if err != nil {
+		return stepResult{}, err
 	}
-	skipped := skippedOutcome(out, summary)
-	job := wfe.JobOf(r.workflow, step.ID)
-	r.recordStep(job, step, skipped)
-	// The history has to agree with the run state: the step is
-	// skipped, and the run says so.
-	r.recordSkipped(s.stepCommand(r, step), step.ID, skipped)
+	if len(states) == 0 {
+		return stepResult{}, nil
+	}
+	return stepResult{Outcome: states[0].Outcome}, nil
+}
+
+// skipThrough passes the steps of the range over and records what the
+// run did.
+//
+// The engine owns the state: the steps of the range are recorded as
+// skipped there. The history follows the state: the run says which
+// steps it passed over, and the checklist of the round follows them.
+//
+// The step of the range whose work is in flight is named, when there
+// is one. A caller that may not pass over a step whose work is in
+// flight says so: the range is left alone.
+func (s *Service) skipThrough(ctx context.Context, r *run, from, target, summary string, allowInFlight bool) ([]wfe.StepState, string, error) {
+	r.mu.Lock()
+	states, busy, err := r.skipRangeLocked(from, target, summary, allowInFlight)
+	r.mu.Unlock()
+	if err != nil {
+		return nil, "", err
+	}
+	for _, st := range states {
+		step, ok := r.stepByID(st.ID)
+		if !ok {
+			continue
+		}
+		// The history has to agree with the run state: the step is
+		// skipped, and the run says so.
+		r.recordSkipped(s.stepCommand(r, step), st.ID, st.Outcome)
+	}
+	r.markSituation()
+	s.refreshRoundTasks(r)
 	s.refreshRun(r)
-	return stepResult{Outcome: skipped}
+	return states, busy, nil
 }
 
 // stepCommand renders the command a step runs, the way the run records
@@ -1134,13 +1280,26 @@ func (s *Service) appendToolResult(r *run, call pendingCall, res stepResult, isE
 	})
 }
 
+// callArgs reads the arguments of a tool call.
+//
+// A call that carries no arguments has none: the reader of an
+// argument is the one that says the argument is missing.
+func callArgs(call pendingCall) (map[string]any, error) {
+	if len(call.Args) == 0 {
+		return nil, nil
+	}
+	var args map[string]any
+	if err := json.Unmarshal(call.Args, &args); err != nil {
+		return nil, toolErrorf("the arguments of %s are not valid JSON", call.Name)
+	}
+	return args, nil
+}
+
 // callArgString reads a string argument of a tool call.
 func callArgString(call pendingCall, name string) (string, error) {
-	var args map[string]any
-	if len(call.Args) > 0 {
-		if err := json.Unmarshal(call.Args, &args); err != nil {
-			return "", toolErrorf("the arguments of %s are not valid JSON", call.Name)
-		}
+	args, err := callArgs(call)
+	if err != nil {
+		return "", err
 	}
 	v, ok := args[name]
 	if !ok {
@@ -1153,16 +1312,34 @@ func callArgString(call pendingCall, name string) (string, error) {
 	return s, nil
 }
 
+// callArgText reads a string argument of a tool call.
+//
+// An empty value is a value: a fact may be empty, and the agent says
+// so when it means it.
+func callArgText(call pendingCall, name string) (string, error) {
+	args, err := callArgs(call)
+	if err != nil {
+		return "", err
+	}
+	v, ok := args[name]
+	if !ok {
+		return "", toolErrorf("%s needs the %q argument", call.Name, name)
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", toolErrorf("the %q argument of %s must be a string", name, call.Name)
+	}
+	return s, nil
+}
+
 // callArgOptional reads a string argument of a tool call that may be
 // absent.
 //
 // An argument that is there but empty reads as absent.
 func callArgOptional(call pendingCall, name string) (string, bool) {
-	var args map[string]any
-	if len(call.Args) > 0 {
-		if err := json.Unmarshal(call.Args, &args); err != nil {
-			return "", false
-		}
+	args, err := callArgs(call)
+	if err != nil {
+		return "", false
 	}
 	v, ok := args[name]
 	if !ok {
@@ -1172,5 +1349,6 @@ func callArgOptional(call pendingCall, name string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return strings.TrimSpace(s), s != ""
+	trimmed := strings.TrimSpace(s)
+	return trimmed, trimmed != ""
 }

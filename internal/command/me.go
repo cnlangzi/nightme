@@ -54,19 +54,24 @@ type MeController interface {
 	// id is the message the operator asked from: the answer of the
 	// command and the state of the run go on the card of that message.
 	Pause(ctx context.Context, chatID, messageID string) error
-	// Resume runs the step the run is on again. It returns what the
+	// Resume runs a step of the round again. It returns what the
 	// command did with that step: its id, and whether the command
 	// recorded a decision. The message id is the message the operator
 	// asked from: the answer of the command and the state of the run go
-	// on the card of that message. The note is the operator's
-	// instruction.
-	Resume(ctx context.Context, chatID, messageID, note string) (me.OperatorDecision, error)
-	// Next skips the step the run is on. It returns what the command
-	// did with that step: its id, and whether the command recorded a
-	// decision. The message id is the message the operator asked from:
-	// the answer of the command and the state of the run go on the card
-	// of that message. The note is the operator's instruction.
-	Next(ctx context.Context, chatID, messageID, note string) (me.OperatorDecision, error)
+	// on the card of that message. The text is what the operator typed
+	// after the subcommand: it names the step the command acts on when
+	// its first token is a step of the workflow, and the rest of it is
+	// the operator's instruction.
+	Resume(ctx context.Context, chatID, messageID, text string) (me.OperatorDecision, error)
+	// Next skips the steps of the round up to and including a step. It
+	// returns what the command did with that step: its id, and whether
+	// the command recorded a decision. The message id is the message
+	// the operator asked from: the answer of the command and the state
+	// of the run go on the card of that message. The text is what the
+	// operator typed after the subcommand: it names the step the
+	// command acts on when its first token is a step of the workflow,
+	// and the rest of it is the operator's instruction.
+	Next(ctx context.Context, chatID, messageID, text string) (me.OperatorDecision, error)
 	// Stop cancels the run of a chat. The message id is the message
 	// the operator stopped the run from: the record of the session
 	// rides on the card of that message.

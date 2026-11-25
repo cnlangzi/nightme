@@ -108,7 +108,7 @@ type Outcome struct {
 | `workflow` | `/me start` 启动的 workflow 的名字 |
 | `run_id` | `/me start` 这次运行的 id |
 | `iterations` | `/me start -i` 指定的轮数——没有这个 flag 时不出现 |
-| `step` | `/me resume` 和 `/me next` 作用的那一步的 id；命令没有动作时是它看的那一步 |
+| `step` | `/me resume` 和 `/me next` 作用的那一步的 id：跳一段时是被点名的那一步（最后被跳过的那一步），重跑时是被重跑的那一步；命令没有动作时是它看的那一步 |
 | `upstream_status` / `upstream_code` | 回合失败时上游报的状态码与它自己的码 |
 
 值的写法是统一的：布尔是 `"true"` / `"false"`，数字是十进制字符串，枚举是小写 snake。**没有值时键不出现**，不用空串。

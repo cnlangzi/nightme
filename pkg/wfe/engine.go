@@ -195,13 +195,21 @@ func ReadySet(state *RunState, wf *Workflow) ([]Step, error) {
 	return out, nil
 }
 
+// conditionDidNotHold is what a step carries when its own condition
+// did not hold.
+//
+// The words tell the plan that the step was passed over by its
+// condition and not by the work: a change of the output it reads can
+// put the step back into the plan.
+const conditionDidNotHold = "the step's condition did not hold"
+
 // recordSkipped records the steps whose condition did not hold.
 func recordSkipped(state *RunState, skipped []readyStep) {
 	for _, step := range skipped {
 		RecordStep(state, step.Job, step.Step, outcome.Outcome{
 			Success:    true,
 			Status:     http.StatusOK,
-			StatusText: "the step's condition did not hold",
+			StatusText: conditionDidNotHold,
 		}, true)
 	}
 }

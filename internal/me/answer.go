@@ -49,9 +49,16 @@ func resumeAnswer(d OperatorDecision) string {
 //
 // The step is skipped when there is a step to pass over. A step the
 // command cannot skip is named, with the reason.
+//
+// A command that named a step passes the steps of the round over up to
+// and including it: the answer names the last step that was passed
+// over.
 func nextAnswer(d OperatorDecision) string {
 	if !d.Act {
 		return nextMark + "The step " + d.Step + " " + d.Why + " — there was nothing to skip."
+	}
+	if d.Through {
+		return nextMark + "The steps up to and including " + d.Step + " are skipped. The run goes on with the workflow."
 	}
 	return nextMark + "The step is skipped: " + d.Step + ". The run goes on with the workflow."
 }

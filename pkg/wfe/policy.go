@@ -69,7 +69,7 @@ func (p *Policy) Record(rec ActionRecord) {
 // a step.
 func belongsToStep(kind ActionKind) bool {
 	switch kind {
-	case ActionKindRun, ActionKindCommand, ActionKindInstruct, ActionKindStall, ActionKindReset:
+	case ActionKindRun, ActionKindCommand, ActionKindInstruct, ActionKindStall, ActionKindReset, ActionKindOutput:
 		return true
 	}
 	return false
@@ -401,7 +401,7 @@ func (p *Policy) StepUsage(idx int) int {
 		case ActionKindReset:
 			after = i
 			n = 0
-		case ActionKindRun, ActionKindCommand, ActionKindInstruct, ActionKindStall:
+		case ActionKindRun, ActionKindCommand, ActionKindInstruct, ActionKindStall, ActionKindOutput:
 			if i > after {
 				n++
 			}

@@ -451,6 +451,11 @@ const (
 	// The operator took the chat back and handed the control to the
 	// run: the step gets a fresh budget.
 	ActionKindReset ActionKind = "reset"
+	// ActionKindOutput is a correction of the output of a step.
+	//
+	// It counts against the step the run is on: it is work the agent
+	// causes, and work that costs nothing never ends.
+	ActionKindOutput ActionKind = "output"
 )
 
 // ActionRecord is one action the run has taken. StepID points at the

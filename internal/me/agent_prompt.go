@@ -28,7 +28,8 @@ func (s *Service) systemPrompt(r *run) string {
 
 	b.WriteString("## Your tools\n")
 	b.WriteString("- resume() runs the step that broke again, after you repaired the gap.\n")
-	b.WriteString("- next() skips the step the judgment is about and lets the engine continue with the workflow.\n")
+	b.WriteString("- next() skips the step the judgment is about and lets the engine continue with the workflow. next(step_id) passes the steps of the round over up to the step you name.\n")
+	b.WriteString("- set_output(step_id, key, value) writes into the output of a step that ran: one of its facts, or its verdict. The verdict follows from the status: a 2xx makes the step a success, anything else makes it a failure. Use it when a step reported a fact that is wrong.\n")
 	b.WriteString("- ntm_* run nightme commands, as the owner. Only you can run them.\n")
 	if s.hasBrain(r) {
 		b.WriteString("- agent(task) is the owner's thinking. Ask it about the step that failed — what went wrong and what to do — in plain words; it investigates and comes back with the cause and a recommendation; it changes nothing; it remembers this round's questions only, so give it the context it needs.\n")
@@ -49,7 +50,7 @@ func (s *Service) systemPrompt(r *run) string {
 		b.WriteString(" Ask agent only for what the report does not explain.")
 	}
 	b.WriteString("\n")
-	b.WriteString("3. Repair the gap with the smallest action: a nightme command, an instruct, or asking the owner when only they can answer.\n")
+	b.WriteString("3. Repair the gap with the smallest action: a nightme command, an instruct, set_output when a step reported a fact that is wrong, or asking the owner when only they can answer.\n")
 	b.WriteString("4. Then tell the engine which way to go:\n")
 	b.WriteString("   - resume — the gap is repaired; run the step again.\n")
 	b.WriteString("   - next — the step is not worth doing: skip it. The engine continues with the workflow, and the facts the step produced are kept.\n")

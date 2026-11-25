@@ -748,8 +748,8 @@ func (s *Service) Pause(ctx context.Context, chatID, messageID string) error {
 // It reports what the command did with the step the run is on: the id
 // of the step and whether the command recorded a decision.
 //
-// A note is the operator's instruction: it joins the conversation the
-// chat model reads.
+// The text is what the operator typed after the subcommand: the step
+// the command acts on, when the text names one, and the note.
 //
 // The decision is carried by the run and applied by the run's loop: a
 // step takes as long as the work takes, so it cannot run in the
@@ -757,8 +757,8 @@ func (s *Service) Pause(ctx context.Context, chatID, messageID string) error {
 //
 // The state of the run is published before the run is woken: it says
 // where the run stands.
-func (s *Service) Resume(ctx context.Context, chatID, messageID, note string) (OperatorDecision, error) {
-	return s.operatorDecision(ctx, chatID, messageID, note, directiveResume)
+func (s *Service) Resume(ctx context.Context, chatID, messageID, text string) (OperatorDecision, error) {
+	return s.operatorDecision(ctx, chatID, messageID, text, directiveResume)
 }
 
 // Next skips the step the run is on.
@@ -768,20 +768,22 @@ func (s *Service) Resume(ctx context.Context, chatID, messageID, note string) (O
 // goes on with the workflow: the step is recorded as skipped, and the
 // facts it produced are kept.
 //
-// A note is the operator's instruction: it joins the conversation the
-// chat model reads.
+// The text is what the operator typed after the subcommand: the step
+// the command passes the steps over to, when the text names one, and
+// the note.
 //
 // The state of the run is published before the run is woken: it says
 // where the run stands.
-func (s *Service) Next(ctx context.Context, chatID, messageID, note string) (OperatorDecision, error) {
-	return s.operatorDecision(ctx, chatID, messageID, note, directiveNext)
+func (s *Service) Next(ctx context.Context, chatID, messageID, text string) (OperatorDecision, error) {
+	return s.operatorDecision(ctx, chatID, messageID, text, directiveNext)
 }
 
 // operatorDecision records the operator's decision for the run and
 // hands the control back to the run.
 //
-// It reports what the command did with the step the run is on: the id
-// of the step and whether the command recorded a decision.
+// It reports what the command did with the step the run is on, or with
+// the step the operator named: the id of the step and whether the
+// command recorded a decision.
 //
 // A command that acts on nothing records nothing: the answer says what
 // did not happen, the state of the run is published all the same, and
@@ -793,19 +795,23 @@ func (s *Service) Next(ctx context.Context, chatID, messageID, note string) (Ope
 //
 // The state of the run is refreshed and the answer with the state of
 // the run is published before the run is woken.
-func (s *Service) operatorDecision(ctx context.Context, chatID, messageID, note, kind string) (OperatorDecision, error) {
+func (s *Service) operatorDecision(ctx context.Context, chatID, messageID, text, kind string) (OperatorDecision, error) {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
 		return OperatorDecision{}, &Refusal{Reason: ReasonNoRun, Message: "this chat has no run in it"}
 	}
-	d, paused, err := r.prepareDecision(kind, note)
+	d, paused, err := r.prepareDecision(kind, text)
 	if err != nil {
 		return OperatorDecision{}, err
 	}
 	if d.skippedNow {
-		s.skipRunningStep(ctx, r, d.Step)
+		if d.Through {
+			s.skipThroughNow(ctx, r, d)
+		} else {
+			s.skipRunningStep(ctx, r, d.Step)
+		}
 	}
 	s.refreshRun(r)
 	s.answerCommand(ctx, r, messageID, decisionAnswer(kind, d))

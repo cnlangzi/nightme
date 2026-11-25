@@ -3,6 +3,7 @@ package me
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/llm"
@@ -39,6 +40,10 @@ const (
 	// ReasonNotPaused says the run waits for an answer: it asked the
 	// operator a question, and `/me reply` is the way to answer it.
 	ReasonNotPaused = "not_paused"
+	// ReasonBadTarget says the step the command named cannot be
+	// moved: it belongs to another job, it has passed, or it did its
+	// job already.
+	ReasonBadTarget = "bad_target"
 )
 
 // reasonError is the generic reason code: the failure has no code of
@@ -78,6 +83,13 @@ type directive struct {
 	Kind string `json:"kind"`
 	// Step is the id of the step the decision acts on.
 	Step string `json:"step,omitempty"`
+	// From is the id of the step the run was on when the decision was
+	// taken. A decision that passes a range of steps over starts
+	// there.
+	From string `json:"from,omitempty"`
+	// Through says the decision passes the steps of the round over up
+	// to and including Step.
+	Through bool `json:"through,omitempty"`
 }
 
 // OperatorDecision is what an operator's command did with the step the
@@ -96,10 +108,17 @@ type OperatorDecision struct {
 	// Why says why the command acted on nothing. The reply of the
 	// command names the step and says what did not happen.
 	Why string
+	// Through says the command passes a range of steps over: the steps
+	// of the round from the step the run was on up to and including
+	// Step.
+	Through bool
 	// skippedNow reports that the step was skipped at once: its work was
 	// in flight, and the command the run waits for was abandoned. The
 	// run holds no decision for it: the step is skipped already.
 	skippedNow bool
+	// from is the id of the step the run was on when the decision was
+	// taken.
+	from string
 }
 
 // The reasons a command acts on nothing.
@@ -129,6 +148,11 @@ const (
 // whether the run was waiting at the gate: a run that waits for the
 // operator has to be woken, a run that is working goes on by itself.
 //
+// The text is what the operator typed after the subcommand. Its first
+// token is the step the command acts on when the workflow has a step
+// with that id; the rest of the text is the note. A first token the
+// workflow does not know makes the whole text the note.
+//
 // The command hands the control back either way: a run that waits for
 // the operator goes on. A command that acts on nothing records no
 // decision: the plan runs the step it was going to run anyway. A
@@ -137,11 +161,12 @@ const (
 //
 // The decision is refused when the run waits for an answer: that
 // state has its own command, `/me reply`.
-func (r *run) prepareDecision(kind, note string) (OperatorDecision, bool, error) {
+func (r *run) prepareDecision(kind, text string) (OperatorDecision, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	d, err := r.decideDirectiveLocked(kind)
+	target, note := r.splitTargetLocked(text)
+	d, err := r.decideDirectiveLocked(kind, target)
 	if err != nil {
 		return OperatorDecision{}, false, err
 	}
@@ -154,7 +179,7 @@ func (r *run) prepareDecision(kind, note string) (OperatorDecision, bool, error)
 	r.pauseReason = ""
 	r.phase = PhaseRunning
 	if d.Act && !d.skippedNow {
-		r.directive = &directive{Kind: kind, Step: d.Step}
+		r.directive = &directive{Kind: kind, Step: d.Step, From: d.from, Through: d.Through}
 	}
 	// The note is the operator's instruction: it joins the
 	// conversation the chat model reads.
@@ -167,7 +192,69 @@ func (r *run) prepareDecision(kind, note string) (OperatorDecision, bool, error)
 	return d, paused, nil
 }
 
+// splitTarget reads the step the operator named out of the text of the
+// command.
+//
+// The target is a positional argument: the first token of the text is
+// the target when the workflow has a step with that id, and the rest
+// of the text is the note. A first token the workflow does not know
+// makes the whole text the note: the command reads what it always
+// read.
+//
+// The caller holds the lock.
+func (r *run) splitTargetLocked(text string) (string, string) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return "", ""
+	}
+	first, rest := splitToken(trimmed)
+	if first == "" || wfe.StepByID(r.workflow, first) == nil {
+		return "", trimmed
+	}
+	return first, strings.TrimSpace(rest)
+}
+
+// skipRange returns the steps a skip through the target covers.
+//
+// The engine owns the state: the range is computed from the run state
+// and the workflow.
+func (r *run) skipRange(from, target string) ([]wfe.Step, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return wfe.SkipRange(r.state, r.workflow, from, target)
+}
+
+// splitToken splits the first whitespace-separated token off a text.
+func splitToken(text string) (string, string) {
+	idx := strings.IndexAny(text, " \t\r\n")
+	if idx < 0 {
+		return text, ""
+	}
+	return text[:idx], text[idx+1:]
+}
+
 // decideDirectiveLocked says what the operator's command will do with
+// the step it named, or with the step the run is on. The caller holds
+// the lock.
+//
+// A command that names a step moves the plan to it: the steps of the
+// round between the step the run is on and the step the operator named
+// are passed over. A command that names no step acts on the step the
+// run is on, as it always did.
+func (r *run) decideDirectiveLocked(kind, target string) (OperatorDecision, error) {
+	if r.ask != nil {
+		return OperatorDecision{}, &Refusal{
+			Reason:  ReasonNotPaused,
+			Message: "this run is waiting for an answer: use /me reply <text>",
+		}
+	}
+	if target != "" {
+		return r.decideTargetLocked(kind, target)
+	}
+	return r.decideCurrentLocked(kind)
+}
+
+// decideCurrentLocked says what the operator's command will do with
 // the step the run is on. The caller holds the lock.
 //
 // The command acts only on a step that ran and did not succeed, and
@@ -186,13 +273,7 @@ func (r *run) prepareDecision(kind, note string) (OperatorDecision, bool, error)
 //
 // The run refuses a decision while it waits for an answer: that state
 // has its own command, `/me reply`.
-func (r *run) decideDirectiveLocked(kind string) (OperatorDecision, error) {
-	if r.ask != nil {
-		return OperatorDecision{}, &Refusal{
-			Reason:  ReasonNotPaused,
-			Message: "this run is waiting for an answer: use /me reply <text>",
-		}
-	}
+func (r *run) decideCurrentLocked(kind string) (OperatorDecision, error) {
 	stepID := r.targetStepLocked()
 	if stepID == "" || r.stepIndex(stepID) < 0 {
 		return OperatorDecision{}, &Refusal{
@@ -256,6 +337,91 @@ func (r *run) decideDirectiveLocked(kind string) (OperatorDecision, error) {
 	}
 	d.Why = reasonNotRun
 	return d, nil
+}
+
+// decideTargetLocked says what the operator's command will do with the
+// step it named. The caller holds the lock.
+//
+// The step is named by its id: the run knows where it stands, and the
+// command moves the plan to the step the operator named. The steps of
+// the round between the step the run is on and the step the operator
+// named are passed over.
+//
+// The command refuses a target it cannot move: a step of another job,
+// a step that has passed, a step that did its job already, and a step
+// of the range whose work is in flight and is not a chat command.
+func (r *run) decideTargetLocked(kind, target string) (OperatorDecision, error) {
+	from := r.targetStepLocked()
+	if from == "" || r.stepIndex(from) < 0 {
+		return OperatorDecision{}, &Refusal{
+			Reason:  reasonError,
+			Message: "there is no step to " + directiveVerb(kind),
+		}
+	}
+	steps, err := wfe.SkipRange(r.state, r.workflow, from, target)
+	if err != nil {
+		return OperatorDecision{}, &Refusal{Reason: ReasonBadTarget, Message: err.Error()}
+	}
+	if kind == directiveResume {
+		if err := r.checkResumableLocked(target); err != nil {
+			return OperatorDecision{}, &Refusal{Reason: ReasonBadTarget, Message: err.Error()}
+		}
+	}
+	// A step of the range that is running: the run cannot go on while
+	// it runs, unless the command it waits for may be abandoned.
+	for _, step := range steps {
+		if !r.stepInFlightLocked(step.ID) {
+			continue
+		}
+		if !r.canAbandonCommandLocked(step.ID) {
+			return OperatorDecision{}, &Refusal{
+				Reason:  ReasonBadTarget,
+				Message: fmt.Sprintf("the step %q is still running and it is not a chat command", step.ID),
+			}
+		}
+	}
+	d := OperatorDecision{Step: target, from: from}
+	if kind == directiveNext {
+		d.Through = true
+		for _, step := range steps {
+			if r.stepInFlightLocked(step.ID) {
+				// The run waits for the command the step sent: the
+				// skip cannot wait for the run's next turn.
+				d.Act = true
+				d.skippedNow = true
+				return d, nil
+			}
+		}
+	}
+	// The run is working: it decides for itself.
+	if !r.pausePendingLocked() {
+		d.Why = reasonWorking
+		return d, nil
+	}
+	d.Act = true
+	return d, nil
+}
+
+// checkResumableLocked says whether the step may run again. The
+// caller holds the lock.
+//
+// A step that has not run has nothing to run again, and a step that
+// did its job has nothing to repair.
+func (r *run) checkResumableLocked(stepID string) error {
+	st, ran := r.stepStateLocked(stepID)
+	if !ran {
+		return fmt.Errorf("the step %q has not run", stepID)
+	}
+	if st.Pending {
+		return fmt.Errorf("the step %q is still running", stepID)
+	}
+	if st.Outcome.Succeeded() {
+		return fmt.Errorf("the step %q already succeeded", stepID)
+	}
+	if !r.runnableStepLocked(stepID) {
+		return fmt.Errorf("the step %q cannot run again", stepID)
+	}
+	return nil
 }
 
 // directiveVerb renders what the directive does, for the messages the
@@ -445,8 +611,30 @@ func (s *Service) applyDirective(ctx context.Context, r *run) error {
 	case directiveResume:
 		return s.applyResume(ctx, r, d.Step)
 	case directiveNext:
+		if d.Through {
+			return s.applySkipThrough(ctx, r, d.From, d.Step)
+		}
 		return s.applyNext(ctx, r, d.Step)
 	}
+	return nil
+}
+
+// applySkipThrough passes the steps of the round over, up to and
+// including the target.
+//
+// The steps of the range are recorded as skipped: the facts they
+// produced are kept, the errors go, and the plan goes on with the
+// workflow.
+func (s *Service) applySkipThrough(ctx context.Context, r *run, from, target string) error {
+	if from == "" || target == "" {
+		return nil
+	}
+	states, err := s.skipThrough(ctx, r, from, target, operatorSkippedSummary)
+	if err != nil || len(states) == 0 {
+		return nil
+	}
+	res := stepResult{Outcome: states[len(states)-1].Outcome}
+	s.recordOperatorAction(r, toolNext, map[string]any{"step_id": target}, res)
 	return nil
 }
 
@@ -482,7 +670,7 @@ func (s *Service) applyResume(ctx context.Context, r *run, stepID string) error 
 		}
 		return err
 	}
-	s.recordOperatorAction(r, toolResume, res)
+	s.recordOperatorAction(r, toolResume, nil, res)
 	return nil
 }
 
@@ -511,7 +699,7 @@ func (s *Service) applyNext(ctx context.Context, r *run, stepID string) error {
 		}
 	}
 	res := s.skipStep(ctx, r, step, operatorSkippedSummary)
-	s.recordOperatorAction(r, toolNext, res)
+	s.recordOperatorAction(r, toolNext, nil, res)
 	return nil
 }
 
@@ -529,7 +717,23 @@ func (s *Service) skipRunningStep(ctx context.Context, r *run, stepID string) {
 		return
 	}
 	res := s.skipStep(ctx, r, step, operatorSkippedSummary)
-	s.recordOperatorAction(r, toolNext, res)
+	s.recordOperatorAction(r, toolNext, nil, res)
+	r.abandonCommand()
+}
+
+// skipThroughNow passes the steps of the range over at once.
+//
+// The run waits for the command the step sent, and a decision that
+// waited for the run's next turn would wait for the command to finish.
+// The steps of the range are recorded as skipped at once, and the
+// command the run waits for is abandoned.
+func (s *Service) skipThroughNow(ctx context.Context, r *run, d OperatorDecision) {
+	states, err := s.skipThrough(ctx, r, d.from, d.Step, operatorSkippedSummary)
+	if err != nil || len(states) == 0 {
+		return
+	}
+	res := stepResult{Outcome: states[len(states)-1].Outcome}
+	s.recordOperatorAction(r, toolNext, map[string]any{"step_id": d.Step}, res)
 	r.abandonCommand()
 }
 
@@ -538,7 +742,10 @@ func (s *Service) skipRunningStep(ctx context.Context, r *run, stepID string) {
 //
 // The action is a synthetic assistant tool call with its result: the
 // model sees what the operator did when it takes over.
-func (s *Service) recordOperatorAction(r *run, tool string, res stepResult) {
-	recordSyntheticCall(r, operatorCallID, tool, map[string]any{})
+func (s *Service) recordOperatorAction(r *run, tool string, args map[string]any, res stepResult) {
+	if args == nil {
+		args = map[string]any{}
+	}
+	recordSyntheticCall(r, operatorCallID, tool, args)
 	s.appendToolResult(r, pendingCall{ID: operatorCallID, Name: tool}, res, false)
 }

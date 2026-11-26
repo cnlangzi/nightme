@@ -121,7 +121,11 @@ func TestEndsWithListOrdinal(t *testing.T) {
 
 func TestAppendAndMaybeFlush_SlidingIdleCoalescesWhileTokensArrive(t *testing.T) {
 	prev := flushDebounce
-	flushDebounce = 40 * time.Millisecond
+	// The window is wide on purpose: the second token has to land
+	// inside it, and a runner that delays the test goroutine between
+	// the two appends must not push it past the deadline. A narrow
+	// window made this test fail on the Windows runner.
+	flushDebounce = 500 * time.Millisecond
 	defer func() { flushDebounce = prev }()
 
 	d := newFlushTestDriver(t)
@@ -131,7 +135,7 @@ func TestAppendAndMaybeFlush_SlidingIdleCoalescesWhileTokensArrive(t *testing.T)
 	select {
 	case ev := <-d.events:
 		t.Fatalf("flushed too early during idle window: %q", ev.Text)
-	case <-time.After(15 * time.Millisecond):
+	case <-time.After(50 * time.Millisecond):
 	}
 
 	// Another token resets the sliding idle clock.
@@ -140,13 +144,13 @@ func TestAppendAndMaybeFlush_SlidingIdleCoalescesWhileTokensArrive(t *testing.T)
 	select {
 	case ev := <-d.events:
 		t.Fatalf("flushed before idle after second sentence: %q", ev.Text)
-	case <-time.After(15 * time.Millisecond):
+	case <-time.After(50 * time.Millisecond):
 	}
 
 	var got agent.AgentEvent
 	select {
 	case got = <-d.events:
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for idle flush")
 	}
 	if got.Kind != agent.EventAgentText {

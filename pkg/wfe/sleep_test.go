@@ -289,6 +289,9 @@ func TestDecide_TheSpentRoundsMakeTheWorkflowOver(t *testing.T) {
 	if !decision.Over {
 		t.Error("Over = false, want the spent rounds to make the workflow over")
 	}
+	if decision.RoundsSpent != "ship" {
+		t.Errorf("RoundsSpent = %q, want the job whose rounds are spent", decision.RoundsSpent)
+	}
 }
 
 // TestDecide_AJobThatRunsOneRoundIsNotOver — a job that runs one round
@@ -308,6 +311,9 @@ func TestDecide_AJobThatRunsOneRoundIsNotOver(t *testing.T) {
 	}
 	if decision.Over {
 		t.Error("Over = true, want the agent to decide about a job that ran one round")
+	}
+	if decision.RoundsSpent != "" {
+		t.Errorf("RoundsSpent = %q, want no job whose rounds are spent", decision.RoundsSpent)
 	}
 }
 
@@ -337,5 +343,8 @@ func TestDecide_ABrokenStepIsNotOver(t *testing.T) {
 	}
 	if decision.Over {
 		t.Error("Over = true, want the agent to decide about the step that broke")
+	}
+	if decision.RoundsSpent != "" {
+		t.Errorf("RoundsSpent = %q, want no job whose rounds are spent", decision.RoundsSpent)
 	}
 }

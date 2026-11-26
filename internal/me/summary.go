@@ -54,6 +54,10 @@ const (
 // The record is posted whenever the run ends, whatever ended it: a
 // run that finishes on its own has a session worth recording too.
 //
+// A run that ended on the limit of its rounds opens a card of its
+// own: the run ended on its own, and the operator reads that in the
+// chat.
+//
 // A run that has no card of its own posts the record on its own: the
 // chat shows it the way it shows every other message of the run.
 func (s *Service) postRecord(r *run) {
@@ -64,6 +68,15 @@ func (s *Service) postRecord(r *run) {
 	// record is posted after that. The context outlives the run here
 	// on purpose.
 	ctx := context.WithoutCancel(r.ctx)
+	if r.spentLimitValue() {
+		// The record opens a card of its own: the record goes out
+		// without an anchor, the chat answers with the id of the card
+		// it wrote, and the identity of the record lands on that card.
+		sess := &session{kind: sessionRecord, id: r.recordSessionID()}
+		sess.anchor = s.publishRecord(ctx, r, sess, r.recordCard())
+		s.publishInit(ctx, r, sess)
+		return
+	}
 	sess := &session{kind: sessionRecord, id: r.id, anchor: r.recordAnchor()}
 	s.publishInit(ctx, r, sess)
 	s.publishRecord(ctx, r, sess, r.recordCard())

@@ -40,6 +40,11 @@ type Decision struct {
 	// step did not break. The run ends on its own — no model is asked
 	// what comes next.
 	Over bool
+	// RoundsSpent names the job whose rounds are spent.
+	//
+	// It is set when Over is true: the workflow is over because that
+	// job ran out of rounds.
+	RoundsSpent string
 	// Gap is the time between the round that ended and the round that
 	// starts. It is set on the decision that starts a job's next
 	// round: the engine reports the gap, the run waits it out.
@@ -248,24 +253,25 @@ func jobDidSomething(state *RunState, wf *Workflow, name string) bool {
 	return false
 }
 
-// roundsSpent reports whether a job of the workflow spent its rounds.
+// roundsSpent reports whether a job of the workflow spent its rounds,
+// and which job it was.
 //
 // A job that runs one round has no rounds to spend: it ran its steps,
 // and the plan is exhausted because of that — the agent may still have
 // something to say about it. A job that repeats knows how many rounds
 // it runs: when they are spent, the workflow is over, and the run ends
 // on its own.
-func roundsSpent(state *RunState, wf *Workflow) bool {
+func roundsSpent(state *RunState, wf *Workflow) (string, bool) {
 	for _, name := range wf.JobOrder() {
 		rounds := wf.Jobs[name].Rounds()
 		if rounds < 2 {
 			continue
 		}
 		if state.Rounds[name] >= rounds {
-			return true
+			return name, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // exhaustedDecision is the decision of a plan that has nothing left to
@@ -275,12 +281,17 @@ func roundsSpent(state *RunState, wf *Workflow) bool {
 // nothing broke: the run ends on its own, and no model is asked what
 // comes next.
 func exhaustedDecision(state *RunState, wf *Workflow, prev StepState, hasPrev, blocked bool) Decision {
+	job, over := "", false
+	if hasPrev && !blocked {
+		job, over = roundsSpent(state, wf)
+	}
 	return Decision{
-		Kind:      DecisionJudgment,
-		Reason:    exhaustedReason(prev, hasPrev),
-		Exhausted: true,
-		Over:      hasPrev && !blocked && roundsSpent(state, wf),
-		Subject:   subjectOf(prev, hasPrev),
+		Kind:        DecisionJudgment,
+		Reason:      exhaustedReason(prev, hasPrev),
+		Exhausted:   true,
+		Over:        over,
+		RoundsSpent: job,
+		Subject:     subjectOf(prev, hasPrev),
 	}
 }
 

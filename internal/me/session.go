@@ -213,6 +213,15 @@ func (r *run) stateSessionID() string {
 	return fmt.Sprintf("state-%d", r.stateCount)
 }
 
+// recordSessionID names the session of the record that opens a card of
+// its own.
+//
+// The name carries the run it accounts for: the footer of the card
+// says which run the record belongs to.
+func (r *run) recordSessionID() string {
+	return r.id + "-record"
+}
+
 // adoptState makes the card of the state the card the round goes on
 // with.
 //
@@ -569,11 +578,14 @@ func (s *Service) publishReply(ctx context.Context, r *run, sess *session, text 
 // The record is the last word of the run: it carries the verdict in
 // its footer, so the card of the run still says how the run ended
 // after the record lands on it.
-func (s *Service) publishRecord(ctx context.Context, r *run, sess *session, text string) {
+//
+// It returns the id of the chat message the record landed on: the
+// record that opens a card of its own takes that id as its anchor.
+func (s *Service) publishRecord(ctx context.Context, r *run, sess *session, text string) string {
 	if sess == nil || strings.TrimSpace(text) == "" {
-		return
+		return ""
 	}
-	s.emit(ctx, r, sess, messages.OutboundMessage{
+	return s.emit(ctx, r, sess, messages.OutboundMessage{
 		Kind:          messages.OutReply,
 		Text:          text,
 		SessionResult: r.runVerdict(),

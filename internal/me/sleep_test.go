@@ -184,7 +184,7 @@ jobs:
 
 	var found bool
 	for _, m := range op.EmittedOf(messages.OutResult) {
-		if m.Result == "repeat is complete" {
+		if m.Result == "repeat is over" {
 			found = true
 		}
 	}

@@ -189,17 +189,17 @@ func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
 	}
 	r.setJudgment(decision.Reason)
 	r.setJudgmentStep(decision.Subject)
-	if decision.Exhausted && s.goalMet(r) {
-		// Every step ran and the last one ended ok: the goal is met
-		// and no model is asked to say so.
-		s.finishDone(r, r.workflow.Name+" is complete")
-		return true, nil
-	}
 	if decision.Over {
 		// The workflow is over: the rounds of its jobs are spent and
 		// nothing broke. The run ends on its own — no model is asked
 		// what comes next.
-		s.finishDone(r, r.workflow.Name+" is over")
+		s.finishSpent(r, decision.RoundsSpent)
+		return true, nil
+	}
+	if decision.Exhausted && s.goalMet(r) {
+		// Every step ran and the last one ended ok: the goal is met
+		// and no model is asked to say so.
+		s.finishDone(r, r.workflow.Name+" is complete")
 		return true, nil
 	}
 	// The budget of the step the run is on bounds what the agent may
@@ -448,15 +448,15 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 		}
 		r.setJudgment(decision.Reason)
 		r.setJudgmentStep(decision.Subject)
-		if decision.Exhausted && s.goalMet(r) {
-			s.finishDone(r, r.workflow.Name+" is complete")
-			return errFinished
-		}
 		if decision.Over {
 			// The workflow is over: the rounds of its jobs are spent
 			// and nothing broke. The run ends on its own — no model is
 			// asked what comes next.
-			s.finishDone(r, r.workflow.Name+" is over")
+			s.finishSpent(r, decision.RoundsSpent)
+			return errFinished
+		}
+		if decision.Exhausted && s.goalMet(r) {
+			s.finishDone(r, r.workflow.Name+" is complete")
 			return errFinished
 		}
 		if s.budgetSpent(r) {
@@ -522,6 +522,28 @@ func (s *Service) finishDone(r *run, summary string) {
 	r.setSummary(summary)
 	s.finish(r, PhaseDone, "")
 	s.refreshRun(r)
+}
+
+// finishSpent ends the run because a job spent its rounds.
+//
+// The run ends on its own: the loop of the job is over, and the record
+// says so on a card of its own.
+func (s *Service) finishSpent(r *run, job string) {
+	r.setSpentLimit()
+	r.setEndReason(spentReason(r, job))
+	s.finishDone(r, r.workflow.Name+" is over")
+}
+
+// spentReason renders why the run ended on the limit of its rounds.
+//
+// The line names the loop and the rounds it ran: the operator reads
+// whether the workflow did its work or ran out of road.
+func spentReason(r *run, job string) string {
+	if job == "" {
+		return "the rounds of the workflow are spent — the run stops here"
+	}
+	return fmt.Sprintf("the loop of %q is done (%d of %d rounds)",
+		job, r.roundsRun(job), r.roundLimit(job))
 }
 
 // now returns the current time.

@@ -183,7 +183,9 @@ type Snapshot struct {
 	Paused bool
 	// PauseReason says why the run paused.
 	PauseReason string
-	// Error is why the run cannot go on, when it cannot.
+	// Error is why the run cannot go on: the failure of a run that
+	// failed, the reason a chat holds no run. A run that ended in any
+	// other way has no error.
 	Error string
 }
 

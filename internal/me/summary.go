@@ -74,7 +74,7 @@ func (s *Service) postRecord(r *run) {
 		// it wrote, and the identity of the record lands on that card.
 		sess := &session{kind: sessionRecord, id: r.recordSessionID()}
 		sess.anchor = s.publishRecord(ctx, r, sess, r.recordCard())
-		s.publishInit(ctx, r, sess)
+		s.publishRecordInit(ctx, r, sess)
 		return
 	}
 	sess := &session{kind: sessionRecord, id: r.id, anchor: r.recordAnchor()}

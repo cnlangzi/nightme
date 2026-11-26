@@ -1194,11 +1194,14 @@ func (r *run) roundOf(stepID string) int {
 	return r.state.RoundOf(job)
 }
 
-// roundsRun returns how many rounds the job ran in this run.
+// roundsRun returns the round the job is in.
+//
+// A job that spent its rounds is in the round it spent them in: the
+// number is what the record tells the operator.
 func (r *run) roundsRun(job string) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.state.Rounds[job]
+	return r.state.RoundOf(job)
 }
 
 // roundLimit returns how many rounds the job runs in this run.
@@ -1853,15 +1856,6 @@ func (r *run) lastTranscriptText() string {
 func (r *run) setSummary(text string) {
 	r.mu.Lock()
 	r.summary = text
-	r.mu.Unlock()
-}
-
-// setEndReason records why the run ended.
-//
-// The reason is the second line of the record of the run.
-func (r *run) setEndReason(text string) {
-	r.mu.Lock()
-	r.endReason = text
 	r.mu.Unlock()
 }
 

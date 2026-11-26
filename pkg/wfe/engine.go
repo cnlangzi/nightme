@@ -253,25 +253,26 @@ func jobDidSomething(state *RunState, wf *Workflow, name string) bool {
 	return false
 }
 
-// roundsSpent reports whether a job of the workflow spent its rounds,
-// and which job it was.
+// roundsSpent returns the job of the workflow that spent its rounds.
 //
 // A job that runs one round has no rounds to spend: it ran its steps,
 // and the plan is exhausted because of that — the agent may still have
 // something to say about it. A job that repeats knows how many rounds
 // it runs: when they are spent, the workflow is over, and the run ends
 // on its own.
-func roundsSpent(state *RunState, wf *Workflow) (string, bool) {
+//
+// The name is empty when no job spent its rounds.
+func roundsSpent(state *RunState, wf *Workflow) string {
 	for _, name := range wf.JobOrder() {
 		rounds := wf.Jobs[name].Rounds()
 		if rounds < 2 {
 			continue
 		}
 		if state.Rounds[name] >= rounds {
-			return name, true
+			return name
 		}
 	}
-	return "", false
+	return ""
 }
 
 // exhaustedDecision is the decision of a plan that has nothing left to
@@ -281,15 +282,15 @@ func roundsSpent(state *RunState, wf *Workflow) (string, bool) {
 // nothing broke: the run ends on its own, and no model is asked what
 // comes next.
 func exhaustedDecision(state *RunState, wf *Workflow, prev StepState, hasPrev, blocked bool) Decision {
-	job, over := "", false
+	job := ""
 	if hasPrev && !blocked {
-		job, over = roundsSpent(state, wf)
+		job = roundsSpent(state, wf)
 	}
 	return Decision{
 		Kind:        DecisionJudgment,
 		Reason:      exhaustedReason(prev, hasPrev),
 		Exhausted:   true,
-		Over:        over,
+		Over:        job != "",
 		RoundsSpent: job,
 		Subject:     subjectOf(prev, hasPrev),
 	}

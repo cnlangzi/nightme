@@ -522,6 +522,26 @@ func (s *Service) publishInit(ctx context.Context, r *run, sess *session) {
 	})
 }
 
+// publishRecordInit announces the record of the run on the card the
+// chat opened for it.
+//
+// The announcement carries the verdict of the run: a chat stamps the
+// footer of a card as a whole, so the stamp that lands last on the
+// card has to carry the verdict itself.
+func (s *Service) publishRecordInit(ctx context.Context, r *run, sess *session) {
+	if sess == nil {
+		return
+	}
+	s.emit(ctx, r, sess, messages.OutboundMessage{
+		Kind:          messages.OutInit,
+		SessionID:     sess.id,
+		Model:         r.modelName(),
+		AgentName:     meAgentName,
+		Workspace:     r.workCwd(),
+		SessionResult: r.runVerdict(),
+	})
+}
+
 // publishTasks publishes the checklist of a session.
 //
 // The snapshot is the whole list: the chat renders it as the card's

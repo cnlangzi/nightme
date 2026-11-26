@@ -134,6 +134,11 @@ func TestTheRecordOfTheSpentRoundsOpensACardOfItsOwn(t *testing.T) {
 	if next.Kind != messages.OutInit || next.ReplyTo != card {
 		t.Errorf("the message after the record is %+v, want the identity of the record on the card %q", next, card)
 	}
+	// The identity lands last on the card, so it carries the verdict:
+	// a chat stamps the footer of a card as a whole.
+	if next.Result != "repeat is over" {
+		t.Errorf("the identity of the record carries %q, want the verdict of the run", next.Result)
+	}
 }
 
 // TestTheRecordOfTheSpentRoundsNamesTheLoop — the record says which

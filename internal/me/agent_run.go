@@ -172,7 +172,13 @@ type run struct {
 
 	phase    Phase
 	question string
-	errMsg   string
+	// endReason says why the run ended. It is the second line of the
+	// record: the error of a run that failed, the loop of a run that
+	// ran out of rounds.
+	endReason string
+	// spentLimit reports whether the run ended because a job spent
+	// its rounds.
+	spentLimit bool
 
 	// paused reports whether the run waits for the operator.
 	paused bool
@@ -398,7 +404,11 @@ func (r *run) snapshot() Snapshot {
 		Question:         r.question,
 		Paused:           r.paused,
 		PauseReason:      r.pauseReason,
-		Error:            r.errMsg,
+	}
+	// A run that ended on the limit of its rounds has no error: the
+	// reason it ended is on its record, not on its state.
+	if r.phase == PhaseFailed {
+		st.Error = r.endReason
 	}
 	if r.inflight != nil {
 		st.Step = r.inflight.Command
@@ -431,7 +441,7 @@ func (r *run) finish(phase Phase, reason string) {
 	r.mu.Lock()
 	r.phase = phase
 	if reason != "" {
-		r.errMsg = reason
+		r.endReason = reason
 	}
 	r.mu.Unlock()
 	r.cancel()
@@ -1184,6 +1194,24 @@ func (r *run) roundOf(stepID string) int {
 	return r.state.RoundOf(job)
 }
 
+// roundsRun returns the round the job is in.
+//
+// A job that spent its rounds is in the round it spent them in: the
+// number is what the record tells the operator.
+func (r *run) roundsRun(job string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.state.RoundOf(job)
+}
+
+// roundLimit returns how many rounds the job runs in this run.
+//
+// The limit is the one of the run: `/me start -i` overrides the count
+// of the file.
+func (r *run) roundLimit(job string) int {
+	return r.workflow.Jobs[job].Rounds()
+}
+
 // exprCtx renders the run's progress as the context an expression
 // reads.
 func (r *run) exprCtx() wfe.ExprCtx {
@@ -1829,6 +1857,24 @@ func (r *run) setSummary(text string) {
 	r.mu.Lock()
 	r.summary = text
 	r.mu.Unlock()
+}
+
+// setSpentLimit records that the run ended on the limit of its
+// rounds.
+func (r *run) setSpentLimit() {
+	r.mu.Lock()
+	r.spentLimit = true
+	r.mu.Unlock()
+}
+
+// spentLimitValue reports whether the run ended on the limit of its
+// rounds.
+//
+// It is false when the run ended any other way.
+func (r *run) spentLimitValue() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.spentLimit
 }
 
 // askUser asks the operator a question and waits for the answer.

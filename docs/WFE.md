@@ -887,7 +887,7 @@ A judgment point is where the workflow cannot decide and the agent does. It is r
 - the ready step is still running — a command waits for an answer;
 - the plan is exhausted — the ready set is empty and no job repeats.
 
-A job that repeats knows how many rounds it runs: when they are spent, the workflow is over and the run ends on its own — no model is asked what comes next. A job that runs one round has no rounds to spend: the plan is exhausted because its steps ran, and the agent still has a say about it.
+A job that repeats knows how many rounds it runs: when they are spent, the workflow is over and the run ends on its own — no model is asked what comes next. The engine names the job whose rounds are spent, and the run says so on the record of the session: the run ends with `<workflow> is over`, not with `<workflow> is complete`. A job that runs one round has no rounds to spend: the plan is exhausted because its steps ran, and the agent still has a say about it.
 
 The agent answers a judgment point with a **directive**:
 
@@ -1112,7 +1112,7 @@ The run speaks in agent sessions, and the chat renders every session the way it 
 | A job round | A card of its own: the round opens it and the chat answers with its id | The tree of the rounds of the run, the closing block of the round that ended, the steps of the round as a checklist, and the round's identity, token usage and repository facts in its footer. The checklist follows the steps of the round. |
 | The state of the run | The message that asked for it — the `/me status`, `/me pause`, `/me resume` or `/me next` message, whose card the chat already holds — or a card of its own when the run stops by itself | The phase line of the run, the tree of the rounds and the checklist of the round. It is a snapshot: it is published once and never changed. |
 | A decision | A card of its own: the line that says the agent takes the workflow over opens it, and the chat answers with its id | The line that opens the card, the reason the decision was taken, the conclusion of every judgment of the step, the thinking of the chat model, the tool calls of the decision as thread events under the card, one entry per reply, and the verdict of the last judgment in its footer. |
-| The record of the finished run | The card of the run, or the card of the `/me stop` message when the operator stopped the run | The account of the session: how the run ended, how long it went, what it did, what went wrong and what the models decided. |
+| The record of the finished run | The card of the run, or the card of the `/me stop` message when the operator stopped the run — or a card of its own when the run ran out of rounds | The account of the session: how the run ended, how long it went, what it did, what went wrong and what the models decided. |
 
 The card of a decision belongs to the step the decision is about: a step that is judged again goes on with the card it has. A judgment about another step ends the card of the step before — the conclusion of its last judgment rides in that card's footer — and opens a card of its own; a step the run comes back to opens a card of its own as well, so one card belongs to one stretch of judgments. The reason of a step is published once: a judgment that comes to the same reason again adds nothing to the card.
 
@@ -1122,7 +1122,7 @@ The state of the run is a card of its own when the run reports it: the phase lin
 
 The state of the run is published whenever the operator asks for it with `/me status`, `/me pause`, `/me resume` or `/me next`, and whenever the run stops by itself — a person took the chat back, the step ran out of budget or the agent was throttled. The operator's command publishes it on the card of its own message, and the run opens a card of its own when it stops by itself. A run that stops while a card of its decision is open publishes no state of its own: that card is on the screen, the round keeps its own card, and the reason of the pause reaches the operator in the chat. The answer of the command is the first entry of the card, and the phase line follows it: `⏸ paused: <the reason the run stopped>`, `asking: <the question the run waits for>`, or `running · step: <the command the run waits for>`.
 
-Every run that ends leaves a record of the session in the chat: the record says how the run ended, what it did, what went wrong and what the models decided. The record is posted once the run has unwound, so the step that was in flight counts as a step that did not run unless it produced an outcome. A run that ends by itself leaves a record too; a run the daemon abandons at its shutdown leaves none, because the run stops where it stands and publishes nothing. The record rides on the card of the run, unless the operator stopped the run: the record of a stopped run rides on the card of the `/me stop` message, so the stop and the record are one card. The two lines land on that card in the order they arrive: the record may come before the line that says the run was stopped.
+Every run that ends leaves a record of the session in the chat: the record says how the run ended, what it did, what went wrong and what the models decided. The record is posted once the run has unwound, so the step that was in flight counts as a step that did not run unless it produced an outcome. A run that ends by itself leaves a record too; a run the daemon abandons at its shutdown leaves none, because the run stops where it stands and publishes nothing. The record rides on the card of the run, unless the operator stopped the run: the record of a stopped run rides on the card of the `/me stop` message, so the stop and the record are one card. The two lines land on that card in the order they arrive: the record may come before the line that says the run was stopped. A run that ran out of rounds opens a card of its own: the run ended on its own, and the operator reads that in the chat.
 
 No card of the run carries a button: the operator drives the run with `/me pause`, `/me resume`, `/me next` and `/me stop`. A question the run asks is the chat's own interactive choice card, and a click on an option is the answer — the answer never reaches the agent. A person who quotes the question instead answers it in their own words — the answer is claimed by the run before the agent sees it.
 
@@ -1195,6 +1195,10 @@ the workflow, the second line is what the workflow is for, and the facts of the
 run follow: how many jobs it has, how many steps they hold, when the run
 started and what it was given. The values of the facts start at the same
 column: the key, its colon, and the padding to the column.
+
+The verdict in the footer is how the run ended: `<workflow> is complete` when
+the plan ran through, `<workflow> is over` when a job ran out of rounds. The
+second one says the loop ended, not that the work is done.
 
 The plan follows the facts, one block per job. The header of a block says how
 many rounds the job runs — `main` for one round, `main ⟳ 3 rounds` for three,
@@ -1342,6 +1346,20 @@ decisions (last 10 of 23):
 ```
 
 The facts come from the run's own record: no model is asked to write the record. The headline names the phase the run ended in, and a run that failed says why under it — an error that never reached an action of the run leaves no row in the `errors` block. The `errors` are the actions whose outcome was a failure or a cancellation, at most the last five of them; the `decisions` are the judgments the models made at the wake-ups, at most the last ten. The tree of the rounds carries the counters of the run: the number of decisions and the tokens ride in its last row, so a run that finished no round shows neither. Its heading stays plain: the number of rounds is the state of a run that is still going, and the record describes a run that is over. A row is cut short: a shell step reports a whole build log as its summary, and a card that carries it is unreadable.
+
+The record of a run that ran out of rounds opens a card of its own: the run ended on its own, and the operator reads that in the chat. The card names the loop that ran out of rounds and the rounds it ran — the count is the limit of the run, whatever `/me start -i <rounds>` set for it:
+
+```
+■ [ repeat ] done
+reason: the loop of "main" is done (2 of 2 rounds)
+
+duration: 0s
+jobs:     main × 2
+actions:  2 (2 ok)
+steps:    1 ran · 0 not run
+```
+
+Only that ending opens a card of its own. A run that failed leaves its record on the card of the run, and a run the operator stopped leaves it on the card of the `/me stop` message.
 
 The wake log holds the model decisions only: the workflow's own fast path is not a decision a model made, so a run that goes through its workflow without asking a model holds no wake records at all. A decision model answer and a chat model turn are two records.
 

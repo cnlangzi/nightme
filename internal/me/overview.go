@@ -183,7 +183,7 @@ func (r *run) recordCard() string {
 	skipped := append([]wfe.SkippedRound(nil), r.state.SkippedRounds...)
 	inflight := r.inflight
 	phase := r.phase
-	reason := r.errMsg
+	reason := r.endReason
 	r.mu.Unlock()
 	wakes := r.wakeRecords()
 	filter := newReportFilter(r.workflow, skipped)

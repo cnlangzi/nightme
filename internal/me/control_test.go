@@ -1397,8 +1397,10 @@ jobs:
 	}
 	waitRun(t, svc, "obs-1")
 
-	if posted := op.Posted(); posted != 2 {
-		t.Fatalf("the run opened %d cards, want one per round", posted)
+	// The run opened a card per round and one for the record of the
+	// limit it ended on.
+	if posted := op.Posted(); posted != 3 {
+		t.Fatalf("the run opened %d cards, want one per round and one for the record", posted)
 	}
 
 	// The card of the second round stands in front of the command of
